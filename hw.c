@@ -81,6 +81,19 @@ void uart_hex(unsigned int d) {
     }
 }
 
+/* UART'tan karakter oku (non-blocking) */
+int uart_getc(void) {
+    if(*UART0_FR & (1<<4)) {  /* RXFE - Receive FIFO Empty */
+        return -1;  /* Karakter yok */
+    }
+    return (int)(*UART0_DR & 0xFF);
+}
+
+/* UART'ta karakter var mı? */
+int uart_available(void) {
+    return !(*UART0_FR & (1<<4));
+}
+
 static int mailbox_call(unsigned char ch) {
     __asm__ volatile("dsb sy");
 
