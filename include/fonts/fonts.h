@@ -2,21 +2,21 @@
 #ifndef FONTS_H
 #define FONTS_H
 
-#include <types.h>
+#include "types.h"
 
 /* Tüm font varyantlarını dahil et */
-#include <fonts/font_inter_16.h>
-#include <fonts/font_inter_16_medium.h>
-#include <fonts/font_inter_16_bold.h>
-#include <fonts/font_inter_20.h>
-#include <fonts/font_inter_20_medium.h>
-#include <fonts/font_inter_20_bold.h>
-#include <fonts/font_inter_24.h>
-#include <fonts/font_inter_24_medium.h>
-#include <fonts/font_inter_24_bold.h>
-#include <fonts/font_inter_32.h>
-#include <fonts/font_inter_32_medium.h>
-#include <fonts/font_inter_32_bold.h>
+#include "font_inter_16.h"
+#include "font_inter_16_medium.h"
+#include "font_inter_16_bold.h"
+#include "font_inter_20.h"
+#include "font_inter_20_medium.h"
+#include "font_inter_20_bold.h"
+#include "font_inter_24.h"
+#include "font_inter_24_medium.h"
+#include "font_inter_24_bold.h"
+#include "font_inter_32.h"
+#include "font_inter_32_medium.h"
+#include "font_inter_32_bold.h"
 
 /* Font boyutları */
 typedef enum {

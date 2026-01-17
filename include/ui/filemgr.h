@@ -21,6 +21,7 @@ void filemgr_up(void);
 void filemgr_down(void);
 void filemgr_enter(void);
 void filemgr_back(void);
+void filemgr_update(void);
 
 /* Durum */
 FileMgrState filemgr_get_state(void);

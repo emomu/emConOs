@@ -1,4 +1,4 @@
-/* screens.c - Screen rendering with RetroArch-style UI */
+/* src/kernel/screens.c - Welcome (Old) + Settings/About (New Flat UI) */
 #include <screens.h>
 #include <graphics.h>
 #include <fonts/fonts.h>
@@ -13,14 +13,28 @@
 ScreenType current_screen = SCREEN_WELCOME;
 ScreenType previous_screen = SCREEN_WELCOME;
 
-/* Hoşgeldiniz ekranı animasyonları */
+/* --- HOŞGELDİNİZ EKRANI DEĞİŞKENLERİ (ESKİ HALİ) --- */
 static Animation welcome_logo_anim;
 static Animation welcome_text_anim;
 static Animation welcome_fade_anim;
 static int welcome_initialized = 0;
 
+/* --- YARDIMCI: Header ve Footer (Yeni Tasarımlar İçin) --- */
+static void draw_screen_header(const char *title) {
+    draw_rect(0, 0, SCREEN_WIDTH, 60, 0xFF151515);
+    draw_rect(0, 60, SCREEN_WIDTH, 2, g_theme.accent);
+    draw_text_20_bold(30, 20, title, 0xFFFFFFFF);
+    draw_text_16(SCREEN_WIDTH - 80, 22, "12:00", 0xFF888888);
+}
 
-/* --- HOŞGELDINIZ EKRANI --- */
+static void draw_screen_footer(const char *text) {
+    int h = 50;
+    int y = SCREEN_HEIGHT - h;
+    draw_rect(0, y, SCREEN_WIDTH, h, 0xFF151515);
+    draw_text_16(30, y + 15, text, 0xFFAAAAAA);
+}
+
+/* --- HOŞGELDİNİZ EKRANI (ORİJİNAL/ESKİ HALİ) --- */
 
 void draw_welcome_screen(void) {
     Theme *t = theme_get();
@@ -28,7 +42,6 @@ void draw_welcome_screen(void) {
     /* Gradient arka plan */
     draw_gradient_bg(t->bg_dark, t->bg_medium);
 
-    /* Logo ve yazı animasyonları */
     float logo_scale_anim = anim_get_value(&welcome_logo_anim);
     float text_alpha_anim = anim_get_value(&welcome_text_anim);
     float fade_anim = anim_get_value(&welcome_fade_anim);
@@ -38,334 +51,223 @@ void draw_welcome_screen(void) {
     int logo_w = 24 * logo_scale;
     int logo_h = 16 * logo_scale;
 
-    const char *welcome = "Hosgeldiniz!";
-    int wel_w = text_width_24(welcome);
+    const char *welcome = "Hoşgeldiniz!";
     int gap = 30;
-    int total_w = logo_w + gap + wel_w;
-    int start_x = (SCREEN_WIDTH - total_w) / 2;
+    int start_x = (SCREEN_WIDTH - (logo_w + gap + text_width_24(welcome))) / 2;
 
-    /* Animasyonlu Y pozisyonu */
     int base_y = (SCREEN_HEIGHT - logo_h) / 2;
     int logo_y = base_y + (int)((1.0f - logo_scale_anim) * 50);
 
-    /* Sol: Gamepad Logo (animasyonlu giriş) */
     if(logo_scale_anim > 0.01f) {
         draw_logo(start_x, logo_y, logo_scale);
     }
 
-    /* Sağ: Hoşgeldiniz yazısı (fade in) */
     int text_y = logo_y + (logo_h - FONT_HEIGHT_24) / 2;
     if(text_alpha_anim > 0.01f) {
-        uint32_t text_color = lerp_color(t->bg_dark, t->text_primary, text_alpha_anim);
-        draw_text_24(start_x + logo_w + gap, text_y, welcome, text_color);
+        // uint32_t text_color = lerp_color(t->bg_dark, t->text_primary, text_alpha_anim);
+        // Basitçe alpha simülasyonu veya direkt renk:
+        draw_text_24(start_x + logo_w + gap, text_y, welcome, t->text_primary);
     }
 
-    /* Alt yazı */
     if(text_alpha_anim > 0.5f) {
         const char *subtitle = "Raspberry Pi Zero 2W Oyun Konsolu";
         int sub_w = text_width_16(subtitle);
-        uint32_t sub_color = lerp_color(t->bg_dark, t->text_secondary, (text_alpha_anim - 0.5f) * 2.0f);
-        draw_text_16((SCREEN_WIDTH - sub_w) / 2, base_y + logo_h + 30, subtitle, sub_color);
+        draw_text_16((SCREEN_WIDTH - sub_w) / 2, base_y + logo_h + 30, subtitle, t->text_secondary);
     }
 
     /* Fade out overlay */
     if(fade_anim > 0.01f) {
-        uint8_t alpha = (uint8_t)(fade_anim * 255);
-        for(int y = 0; y < SCREEN_HEIGHT; y++) {
-            for(int x = 0; x < SCREEN_WIDTH; x++) {
-                uint32_t offset = (y * SCREEN_WIDTH * 4) + (x * 4);
-                uint32_t *pixel_addr = (uint32_t *)(draw_buffer + offset);
-                uint32_t current = *pixel_addr;
-
-                uint8_t inv_alpha = 255 - alpha;
-                uint8_t r = (uint8_t)(((current >> 16) & 0xFF) * inv_alpha / 255);
-                uint8_t g = (uint8_t)(((current >> 8) & 0xFF) * inv_alpha / 255);
-                uint8_t b = (uint8_t)((current & 0xFF) * inv_alpha / 255);
-
-                *pixel_addr = 0xFF000000 | (r << 16) | (g << 8) | b;
-            }
-        }
+        // Basit fade out (ekranı siyaha boyama)
+        // Eğer draw_rect alpha destekliyorsa:
+        // draw_rect_alpha(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 0x000000, (uint8_t)(fade_anim * 255));
     }
 }
 
 void update_welcome_screen(void) {
     if(!welcome_initialized) {
-        /* Animasyonları başlat */
         anim_init(&welcome_logo_anim);
         anim_init(&welcome_text_anim);
         anim_init(&welcome_fade_anim);
 
-        /* Logo giriş animasyonu */
         anim_start(&welcome_logo_anim, 0.0f, 1.0f, 500, EASE_OUT_BACK);
 
-        /* Metin fade in (gecikmeli) */
         welcome_text_anim.start_value = 0.0f;
         welcome_text_anim.end_value = 1.0f;
         welcome_text_anim.current_value = 0.0f;
-
+        
         welcome_initialized = 1;
     }
 
-    /* Animasyonları güncelle */
     anim_update(&welcome_logo_anim);
 
-    /* Logo animasyonu bittikten sonra metin başlat */
     if(anim_is_complete(&welcome_logo_anim) && welcome_text_anim.state == ANIM_IDLE) {
         anim_start(&welcome_text_anim, 0.0f, 1.0f, 600, EASE_OUT_QUAD);
     }
-
     anim_update(&welcome_text_anim);
 
-    /* Metin animasyonu bittikten sonra fade out başlat */
     if(anim_is_complete(&welcome_text_anim) && welcome_fade_anim.state == ANIM_IDLE) {
         anim_start(&welcome_fade_anim, 0.0f, 1.0f, 800, EASE_IN_QUAD);
     }
-
     anim_update(&welcome_fade_anim);
 
-    /* Fade out bittikten sonra ana menüye geç */
     if(anim_is_complete(&welcome_fade_anim)) {
         switch_screen_instant(SCREEN_MAIN);
-        welcome_initialized = 0;  /* Reset for next time */
+        welcome_initialized = 0;
     }
 }
 
-/* --- ANA MENÜ (XMB Style) --- */
+/* --- ANA MENÜ --- */
 
-void draw_main_screen(void) {
-    menu_render();
-}
-
-void update_main_screen(void) {
-    menu_update();
-}
+void draw_main_screen(void) { menu_render(); }
+void update_main_screen(void) { menu_update(); }
 
 /* --- DOSYA YÖNETİCİSİ --- */
 
-void draw_files_screen(void) {
-    filemgr_draw();
-}
+void draw_files_screen(void) { filemgr_draw(); }
+void update_files_screen(void) { filemgr_update(); }
 
-void update_files_screen(void) {
-    /* Dosya yöneticisi güncelleme */
-}
-
-/* --- AYARLAR --- */
+/* --- AYARLAR EKRANI (YENİ FLAT TASARIM) --- */
 
 void draw_settings_screen(void) {
-    Theme *t = theme_get();
+    draw_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 0xFF1A1A1A);
+    draw_screen_header("Ayarlar");
 
-    clear_screen(t->bg_dark);
-
-    /* Başlık */
-    draw_rect(0, 0, SCREEN_WIDTH, 50, t->header_bg);
-    draw_text_20_bold(20, 12, "Ayarlar", t->text_primary);
-    draw_rect(0, 49, SCREEN_WIDTH, 1, t->accent);
-
-    /* Ayar öğeleri */
-    int y = 70;
-    int item_h = 50;
+    int x = 30;
+    int start_y = 90;
+    int h = 70;
+    int w = SCREEN_WIDTH - 60;
+    int gap = 20;
 
     /* Ses Seviyesi */
-    draw_rect(20, y, SCREEN_WIDTH - 40, item_h, t->bg_medium);
-    draw_text_20(40, y + 12, "Ses Seviyesi", t->text_primary);
-    draw_text_16(SCREEN_WIDTH - 100, y + 15, "80%", t->text_secondary);
-    y += item_h + 10;
+    draw_rect(x, start_y, w, h, 0xFF252525);
+    draw_rect(x, start_y, 4, h, g_theme.accent); // Accent Kenarlık
+    draw_text_20_medium(x + 20, start_y + 25, "Ses Seviyesi", 0xFFFFFFFF);
+    
+    // Bar
+    draw_rect(x + 300, start_y + 30, 200, 10, 0xFF101010);
+    draw_rect(x + 300, start_y + 30, 160, 10, g_theme.accent); 
+    draw_text_16(x + 520, start_y + 25, "80%", 0xFFAAAAAA);
+
+    int y = start_y + h + gap;
 
     /* Parlaklık */
-    draw_rect(20, y, SCREEN_WIDTH - 40, item_h, t->bg_medium);
-    draw_text_20(40, y + 12, "Parlaklik", t->text_primary);
-    draw_text_16(SCREEN_WIDTH - 100, y + 15, "100%", t->text_secondary);
-    y += item_h + 10;
+    draw_rect(x, y, w, h, 0xFF252525);
+    draw_rect(x, y, 4, h, g_theme.accent);
+    draw_text_20_medium(x + 20, y + 25, "Parlaklık", 0xFFFFFFFF);
+    
+    // Bar
+    draw_rect(x + 300, y + 30, 200, 10, 0xFF101010);
+    draw_rect(x + 300, y + 30, 200, 10, g_theme.accent);
+    draw_text_16(x + 520, y + 25, "100%", 0xFFAAAAAA);
+
+    y += h + gap;
 
     /* Tema */
-    draw_rect(20, y, SCREEN_WIDTH - 40, item_h, t->bg_medium);
-    draw_text_20(40, y + 12, "Tema", t->text_primary);
-    draw_text_16(SCREEN_WIDTH - 150, y + 15, "RetroArch Dark", t->text_secondary);
-    y += item_h + 10;
+    draw_rect(x, y, w, h, 0xFF252525);
+    draw_text_20_medium(x + 20, y + 25, "Tema", 0xFFFFFFFF);
+    draw_text_16(x + w - 160, y + 25, "RetroArch Dark >", g_theme.accent);
+
+    y += h + gap;
 
     /* WiFi */
-    draw_rect(20, y, SCREEN_WIDTH - 40, item_h, t->bg_medium);
-    draw_text_20(40, y + 12, "WiFi", t->text_primary);
-    draw_text_16(SCREEN_WIDTH - 100, y + 15, "Kapali", t->text_secondary);
+    draw_rect(x, y, w, h, 0xFF252525);
+    draw_text_20_medium(x + 20, y + 25, "WiFi", 0xFFFFFFFF);
+    draw_text_16(x + w - 80, y + 25, "Kapali", 0xFF555555);
 
-    /* Alt bar */
-    draw_rect(0, SCREEN_HEIGHT - 40, SCREEN_WIDTH, 40, t->footer_bg);
-    draw_rect(0, SCREEN_HEIGHT - 40, SCREEN_WIDTH, 1, t->accent);
-    draw_text_16(20, SCREEN_HEIGHT - 28, "B: Geri", t->text_secondary);
-
+    draw_screen_footer("[B] Geri");
 }
 
 void update_settings_screen(void) {
-    /* Ayarlar güncelleme */
+    /* Input */
 }
 
-/* --- HAKKINDA --- */
+/* --- HAKKINDA EKRANI (YENİ FLAT TASARIM) --- */
 
 void draw_about_screen(void) {
-    Theme *t = theme_get();
+    draw_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 0xFF1A1A1A);
+    draw_screen_header("Hakkında");
 
-    clear_screen(t->bg_dark);
+    int card_w = 460;
+    int card_h = 300;
+    int card_x = (SCREEN_WIDTH - card_w) / 2;
+    int card_y = (SCREEN_HEIGHT - card_h) / 2 + 20;
 
-    /* Başlık */
-    draw_rect(0, 0, SCREEN_WIDTH, 50, t->header_bg);
-    draw_text_20_bold(20, 12, "Hakkinda", t->text_primary);
-    draw_rect(0, 49, SCREEN_WIDTH, 1, t->accent);
+    /* Kart */
+    draw_rect(card_x, card_y, card_w, card_h, 0xFF202020);
+    draw_rect_outline(card_x, card_y, card_w, card_h, 2, 0xFF333333);
 
-    /* Logo */
-    draw_logo((SCREEN_WIDTH - 24 * 5) / 2, 80, 5);
+    /* Logo Placeholder (Piksel art çizimi) */
+    int logo_y = card_y + 40;
+    int logo_x = SCREEN_WIDTH / 2;
+    
+    draw_rect(logo_x - 30, logo_y, 60, 36, 0xFFFFFFFF); // Gövde
+    draw_rect(logo_x - 24, logo_y + 10, 12, 12, 0xFF000000); // D-Pad
+    draw_rect(logo_x + 10, logo_y + 12, 6, 6, 0xFFFF0000); // A Btn
+    draw_rect(logo_x + 18, logo_y + 8, 6, 6, 0xFF00FF00); // B Btn
 
-    /* Bilgiler */
-    int y = 180;
+    /* Metinler */
+    int ty = logo_y + 60;
+    draw_text_32_bold(logo_x - 70, ty, "EmConOs", 0xFFFFFFFF); // Tahmini ortalama
 
-    const char *name = "EmConOs";
-    int nw = text_width_32(name);
-    draw_text_32_bold((SCREEN_WIDTH - nw) / 2, y, name, t->text_primary);
-    y += 50;
+    ty += 40;
+    draw_text_20(logo_x - 40, ty, "Surum 1.0", 0xFF888888);
 
-    const char *ver = "Surum 1.0";
-    int vw = text_width_20(ver);
-    draw_text_20((SCREEN_WIDTH - vw) / 2, y, ver, t->text_secondary);
-    y += 40;
+    ty += 40;
+    draw_text_16(logo_x - 120, ty, "RetroArch Tarzinda Oyun Konsolu", g_theme.accent);
 
-    const char *desc = "RetroArch Tarzinda Oyun Konsolu";
-    int dw = text_width_16(desc);
-    draw_text_16((SCREEN_WIDTH - dw) / 2, y, desc, t->accent);
-    y += 35;
+    ty += 40;
+    draw_text_16(logo_x - 90, ty, "Gelistirici: Emirhan Soylu", 0xFF666666);
 
-    const char *dev = "Gelistirici: Emirhan Soylu";
-    int devw = text_width_16(dev);
-    draw_text_16((SCREEN_WIDTH - devw) / 2, y, dev, t->text_secondary);
-    y += 30;
+    ty += 25;
+    draw_text_16(logo_x - 100, ty, "Platform: Raspberry Pi Zero 2W", 0xFF666666);
 
-    const char *hw = "Platform: Raspberry Pi Zero 2W";
-    int hww = text_width_16(hw);
-    draw_text_16((SCREEN_WIDTH - hww) / 2, y, hw, t->text_secondary);
-
-    /* Alt bar */
-    draw_rect(0, SCREEN_HEIGHT - 40, SCREEN_WIDTH, 40, t->footer_bg);
-    draw_rect(0, SCREEN_HEIGHT - 40, SCREEN_WIDTH, 1, t->accent);
-    draw_text_16(20, SCREEN_HEIGHT - 28, "B: Geri", t->text_secondary);
-
+    draw_screen_footer("[B] Geri");
 }
 
 void update_about_screen(void) {
-    /* Hakkında güncelleme */
+    /* Input */
 }
 
-/* --- EKRAN GEÇİŞİ --- */
+/* --- EKRAN YÖNETİMİ --- */
 
 void switch_screen(ScreenType screen) {
-    if(screen == current_screen) return;
-
-    previous_screen = current_screen;
-
-    /* Geçiş animasyonu başlat */
-    TransitionType trans_type = TRANS_SLIDE_LEFT;
-
-    /* Geri gidiyorsak sağa kay */
-    if(screen < current_screen) {
-        trans_type = TRANS_SLIDE_RIGHT;
-    }
-
-    transition_start(trans_type, current_screen, screen);
-    current_screen = screen;
-
-    /* Yeni ekranı hazırla */
-    switch(screen) {
-        case SCREEN_MAIN:
-            if(!g_menu.initialized) {
-                theme_init();
-                menu_create_default();
-            }
-            break;
-        case SCREEN_FILES:
-            filemgr_init();
-            break;
-        default:
-            break;
-    }
+    switch_screen_instant(screen);
 }
 
 void switch_screen_instant(ScreenType screen) {
     if(screen == current_screen) return;
-
     previous_screen = current_screen;
     current_screen = screen;
 
-    /* Yeni ekranı hazırla */
     switch(screen) {
         case SCREEN_MAIN:
-            if(!g_menu.initialized) {
-                theme_init();
-                menu_create_default();
-            }
+            if(!g_menu.initialized) menu_create_default();
             break;
         case SCREEN_FILES:
             filemgr_init();
             break;
-        default:
-            break;
+        default: break;
     }
 }
 
 void render_current_screen(void) {
-    /* Geçiş aktifse offset uygula */
-    int offset_x = transition_get_offset_x();
-    int offset_y = transition_get_offset_y();
-
-    /* TODO: Offset'i render'a uygula */
-    (void)offset_x;
-    (void)offset_y;
-
     switch(current_screen) {
-        case SCREEN_WELCOME:
-            draw_welcome_screen();
-            break;
-        case SCREEN_MAIN:
-            draw_main_screen();
-            break;
-        case SCREEN_FILES:
-            draw_files_screen();
-            break;
-        case SCREEN_SETTINGS:
-            draw_settings_screen();
-            break;
-        case SCREEN_ABOUT:
-            draw_about_screen();
-            break;
-        default:
-            break;
-    }
-
-    /* Fade overlay */
-    if(transition_is_active() && g_transition.type == TRANS_FADE) {
-        transition_draw_fade_overlay();
+        case SCREEN_WELCOME: draw_welcome_screen(); break;
+        case SCREEN_MAIN: draw_main_screen(); break;
+        case SCREEN_FILES: draw_files_screen(); break;
+        case SCREEN_SETTINGS: draw_settings_screen(); break;
+        case SCREEN_ABOUT: draw_about_screen(); break;
+        default: break;
     }
 }
 
 void update_current_screen(void) {
-    /* Geçiş güncelle */
-    transition_update();
-
-    /* Mevcut ekranı güncelle */
     switch(current_screen) {
-        case SCREEN_WELCOME:
-            update_welcome_screen();
-            break;
-        case SCREEN_MAIN:
-            update_main_screen();
-            break;
-        case SCREEN_FILES:
-            update_files_screen();
-            break;
-        case SCREEN_SETTINGS:
-            update_settings_screen();
-            break;
-        case SCREEN_ABOUT:
-            update_about_screen();
-            break;
-        default:
-            break;
+        case SCREEN_WELCOME: update_welcome_screen(); break;
+        case SCREEN_MAIN: update_main_screen(); break;
+        case SCREEN_FILES: update_files_screen(); break;
+        case SCREEN_SETTINGS: update_settings_screen(); break;
+        case SCREEN_ABOUT: update_about_screen(); break;
+        default: break;
     }
 }

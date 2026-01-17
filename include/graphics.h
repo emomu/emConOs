@@ -20,6 +20,17 @@ void clear_screen(uint32_t color);
 
 /* Gradient arka plan */
 void draw_gradient_bg(uint32_t color_top, uint32_t color_bottom);
+void draw_gradient_rect(int x, int y, int w, int h, uint32_t color_top, uint32_t color_bottom);
+
+/* Modern UI efektleri */
+void draw_rect_alpha(int x, int y, int w, int h, uint32_t color, uint8_t alpha);
+void draw_glass_panel(int x, int y, int w, int h, uint32_t tint, uint8_t alpha);
+void draw_rounded_rect(int x, int y, int w, int h, int radius, uint32_t color);
+void draw_rounded_rect_alpha(int x, int y, int w, int h, int radius, uint32_t color, uint8_t alpha);
+void draw_shadow(int x, int y, int w, int h, int blur, uint8_t intensity);
+void draw_glow(int x, int y, int w, int h, uint32_t color, int size);
+void draw_line_h(int x, int y, int w, uint32_t color);
+void draw_line_v(int x, int y, int h, uint32_t color);
 
 /* Çift tamponlama */
 void graphics_init_buffers(void);

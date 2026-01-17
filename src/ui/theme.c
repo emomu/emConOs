@@ -132,11 +132,47 @@ const Theme THEME_PRESET_NEON_PURPLE = {
     .error = 0xFFff0066
 };
 
+/* Modern Dark Theme (Neutral Greys) */
+const Theme THEME_PRESET_MODERN_DARK = {
+    /* Arka plan renkleri - Nötr Koyu Griler */
+    .bg_dark = 0xFF121212,          /* Çok koyu gri / Neredeyse siyah */
+    .bg_medium = 0xFF1e1e1e,        /* Koyu gri */
+    .bg_light = 0xFF2d2d2d,         /* Orta gri */
+
+    /* Vurgu renkleri - Canlı */
+    .accent = 0xFFff6b35,           /* Turuncu */
+    .accent_alt = 0xFF4ecdc4,       /* Turkuaz */
+    .accent_glow = 0xFFff8c5a,      /* Açık turuncu */
+
+    /* Metin renkleri */
+    .text_primary = 0xFFeeeeee,     /* Kırık beyaz */
+    .text_secondary = 0xFFb0b0b0,   /* Gri metin */
+    .text_disabled = 0xFF606060,
+    .text_highlight = 0xFFffcc00,
+
+    /* UI elemanları */
+    .header_bg = 0xFF1a1a1a,
+    .footer_bg = 0xFF1a1a1a,
+    .selected_bg = 0xFF333333,
+    .hover_bg = 0xFF252525,
+
+    /* Özel renkler */
+    .icon_games = 0xFF4a9ff5,       /* Mavi */
+    .icon_files = 0xFFf5a623,       /* Turuncu */
+    .icon_settings = 0xFF7b68ee,    /* Mor */
+    .icon_about = 0xFF50c878,       /* Yeşil */
+
+    /* Durum renkleri */
+    .success = 0xFF4caf50,
+    .warning = 0xFFff9800,
+    .error = 0xFFf44336
+};
+
 /* --- Tema Fonksiyonları --- */
 
 void theme_init(void) {
-    /* Varsayılan tema: RetroArch Dark */
-    theme_set(THEME_RETROARCH_DARK);
+    /* Varsayılan tema: Modern Dark (Nötr) */
+    theme_set_custom(&THEME_PRESET_MODERN_DARK);
 }
 
 void theme_set(ThemePreset preset) {

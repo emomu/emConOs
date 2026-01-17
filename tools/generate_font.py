@@ -32,10 +32,28 @@ FONT_VARIANTS = [
     ("font_inter_32_bold", "Inter-Bold.ttf", 32, "Inter Bold 32px"),
 ]
 
-# Karakter aralığı (ASCII 32-126)
+# Karakter aralığı (ASCII 32-126 + Türkçe karakterler)
 CHAR_START = 32
 CHAR_END = 127
-CHAR_COUNT = CHAR_END - CHAR_START
+ASCII_CHAR_COUNT = CHAR_END - CHAR_START
+
+# Türkçe karakterler (Unicode codepoints)
+TURKISH_CHARS = [
+    (0x011F, 'ğ'),  # g with breve
+    (0x011E, 'Ğ'),  # G with breve
+    (0x00FC, 'ü'),  # u with diaeresis
+    (0x00DC, 'Ü'),  # U with diaeresis
+    (0x015F, 'ş'),  # s with cedilla
+    (0x015E, 'Ş'),  # S with cedilla
+    (0x0131, 'ı'),  # dotless i
+    (0x0130, 'İ'),  # I with dot above
+    (0x00F6, 'ö'),  # o with diaeresis
+    (0x00D6, 'Ö'),  # O with diaeresis
+    (0x00E7, 'ç'),  # c with cedilla
+    (0x00C7, 'Ç'),  # C with cedilla
+]
+TURKISH_CHAR_COUNT = len(TURKISH_CHARS)
+CHAR_COUNT = ASCII_CHAR_COUNT + TURKISH_CHAR_COUNT
 
 def download_fonts():
     """Inter fontlarını indir"""
@@ -63,57 +81,66 @@ def download_fonts():
 
     print("Fontlar indirildi!")
 
+def render_char(font, char, code, font_size, font_height):
+    """Tek bir karakteri render et"""
+    # Karakter boyutlarını al
+    bbox = font.getbbox(char)
+    if bbox:
+        left, top, right, bottom = bbox
+        char_width = right - left
+        advance = font.getlength(char)
+    else:
+        char_width = font_size // 3
+        advance = char_width
+
+    # Advance width (karakter arası boşluk dahil)
+    advance = int(advance) + 1
+    if advance < 3:
+        advance = font_size // 3
+
+    # Görüntü oluştur
+    img = Image.new('L', (advance, font_height), 0)
+    draw = ImageDraw.Draw(img)
+
+    # Karakteri çiz (baseline'a göre)
+    draw.text((0, 0), char, font=font, fill=255)
+
+    # Piksel verilerini al
+    pixels = list(img.getdata())
+
+    return {
+        'char': char,
+        'code': code,
+        'width': advance,
+        'height': font_height,
+        'pixels': pixels
+    }
+
 def render_font(font_file, font_size):
-    """Fontu render et"""
+    """Fontu render et (ASCII + Türkçe)"""
     font = ImageFont.truetype(font_file, font_size)
 
     # Ascent ve descent hesapla
     ascent, descent = font.getmetrics()
     font_height = ascent + descent
 
-    # Her karakteri render et
-    glyphs = []
-
+    # ASCII karakterleri render et
+    ascii_glyphs = []
     for code in range(CHAR_START, CHAR_END):
         char = chr(code)
+        glyph = render_char(font, char, code, font_size, font_height)
+        ascii_glyphs.append(glyph)
 
-        # Karakter boyutlarını al
-        bbox = font.getbbox(char)
-        if bbox:
-            left, top, right, bottom = bbox
-            char_width = right - left
-            advance = font.getlength(char)
-        else:
-            char_width = font_size // 3
-            advance = char_width
+    # Türkçe karakterleri render et
+    turkish_glyphs = []
+    for code, char in TURKISH_CHARS:
+        glyph = render_char(font, char, code, font_size, font_height)
+        turkish_glyphs.append(glyph)
 
-        # Advance width (karakter arası boşluk dahil)
-        advance = int(advance) + 1
-        if advance < 3:
-            advance = font_size // 3
+    return ascii_glyphs, turkish_glyphs, font_height
 
-        # Görüntü oluştur
-        img = Image.new('L', (advance, font_height), 0)
-        draw = ImageDraw.Draw(img)
-
-        # Karakteri çiz (baseline'a göre)
-        draw.text((0, 0), char, font=font, fill=255)
-
-        # Piksel verilerini al
-        pixels = list(img.getdata())
-
-        glyphs.append({
-            'char': char,
-            'code': code,
-            'width': advance,
-            'height': font_height,
-            'pixels': pixels
-        })
-
-    return glyphs, font_height
-
-def generate_c_code(glyphs, font_height, output_name, description):
-    """C kodu oluştur"""
+def generate_c_code(ascii_glyphs, turkish_glyphs, font_height, output_name, description):
+    """C kodu oluştur (ASCII + Türkçe)"""
 
     # Makro isimleri için büyük harf
     macro_prefix = output_name.upper()
@@ -128,7 +155,23 @@ def generate_c_code(glyphs, font_height, output_name, description):
 #define {macro_prefix}_HEIGHT {font_height}
 #define {macro_prefix}_FIRST_CHAR {CHAR_START}
 #define {macro_prefix}_LAST_CHAR {CHAR_END - 1}
-#define {macro_prefix}_CHAR_COUNT {CHAR_COUNT}
+#define {macro_prefix}_ASCII_COUNT {ASCII_CHAR_COUNT}
+#define {macro_prefix}_TURKISH_COUNT {TURKISH_CHAR_COUNT}
+#define {macro_prefix}_CHAR_COUNT ({ASCII_CHAR_COUNT} + {TURKISH_CHAR_COUNT})
+
+/* Türkçe karakter indeksleri */
+#define TR_IDX_G_BREVE_LOWER  0   /* ğ */
+#define TR_IDX_G_BREVE_UPPER  1   /* Ğ */
+#define TR_IDX_U_UMLAUT_LOWER 2   /* ü */
+#define TR_IDX_U_UMLAUT_UPPER 3   /* Ü */
+#define TR_IDX_S_CEDILLA_LOWER 4  /* ş */
+#define TR_IDX_S_CEDILLA_UPPER 5  /* Ş */
+#define TR_IDX_I_DOTLESS      6   /* ı */
+#define TR_IDX_I_DOTTED       7   /* İ */
+#define TR_IDX_O_UMLAUT_LOWER 8   /* ö */
+#define TR_IDX_O_UMLAUT_UPPER 9   /* Ö */
+#define TR_IDX_C_CEDILLA_LOWER 10 /* ç */
+#define TR_IDX_C_CEDILLA_UPPER 11 /* Ç */
 
 /* Karakter bilgisi */
 typedef struct {{
@@ -137,31 +180,45 @@ typedef struct {{
 }} {output_name}_Glyph;
 
 /* Font verileri */
-extern const {output_name}_Glyph {output_name}_glyphs[{CHAR_COUNT}];
+extern const {output_name}_Glyph {output_name}_glyphs[{ASCII_CHAR_COUNT}];
+extern const {output_name}_Glyph {output_name}_turkish_glyphs[{TURKISH_CHAR_COUNT}];
 extern const uint8_t {output_name}_pixels[];
 
 /* Karakter çizme fonksiyonu */
 void {output_name}_draw_char(int x, int y, char c, uint32_t color);
+void {output_name}_draw_turkish_char(int x, int y, int tr_index, uint32_t color);
 void {output_name}_draw_text(int x, int y, const char* text, uint32_t color);
 int {output_name}_text_width(const char* text);
+int {output_name}_turkish_char_width(int tr_index);
 
 #endif
 """
 
     # C dosyası
     c_code = f"""/* {output_name}.c - {description} */
-#include "{output_name}.h"
-#include "graphics.h"
+#include <fonts/{output_name}.h>
+#include <graphics.h>
 
-/* Glyph bilgileri (genişlik ve offset) */
-const {output_name}_Glyph {output_name}_glyphs[{CHAR_COUNT}] = {{
+/* ASCII Glyph bilgileri (genişlik ve offset) */
+const {output_name}_Glyph {output_name}_glyphs[{ASCII_CHAR_COUNT}] = {{
 """
 
-    # Glyph bilgilerini ekle
+    # ASCII Glyph bilgilerini ekle
     offset = 0
-    for i, glyph in enumerate(glyphs):
+    for i, glyph in enumerate(ascii_glyphs):
         char_display = glyph['char'] if glyph['code'] > 32 else ' '
         c_code += f"    {{ {glyph['width']:2d}, {offset:5d} }},  /* {glyph['code']:3d}: '{char_display}' */\n"
+        offset += glyph['width'] * font_height
+
+    c_code += "};\n\n"
+
+    # Türkçe Glyph bilgilerini ekle
+    c_code += f"/* Türkçe karakter Glyph bilgileri */\n"
+    c_code += f"const {output_name}_Glyph {output_name}_turkish_glyphs[{TURKISH_CHAR_COUNT}] = {{\n"
+
+    turkish_names = ['ğ', 'Ğ', 'ü', 'Ü', 'ş', 'Ş', 'ı', 'İ', 'ö', 'Ö', 'ç', 'Ç']
+    for i, glyph in enumerate(turkish_glyphs):
+        c_code += f"    {{ {glyph['width']:2d}, {offset:5d} }},  /* {turkish_names[i]} */\n"
         offset += glyph['width'] * font_height
 
     c_code += "};\n\n"
@@ -171,7 +228,9 @@ const {output_name}_Glyph {output_name}_glyphs[{CHAR_COUNT}] = {{
     c_code += f"const uint8_t {output_name}_pixels[] = {{\n"
 
     all_pixels = []
-    for glyph in glyphs:
+    for glyph in ascii_glyphs:
+        all_pixels.extend(glyph['pixels'])
+    for glyph in turkish_glyphs:
         all_pixels.extend(glyph['pixels'])
 
     # 20 piksel per satır
@@ -182,7 +241,36 @@ const {output_name}_Glyph {output_name}_glyphs[{CHAR_COUNT}] = {{
     c_code += "};\n\n"
 
     # Çizim fonksiyonları
-    c_code += f"""/* Tek karakter çiz */
+    c_code += f"""/* UTF-8 karakterini Türkçe indeksine dönüştür */
+static int {output_name}_utf8_to_turkish(const char **str) {{
+    const unsigned char *s = (const unsigned char *)*str;
+    if(s[0] < 0x80) return -1;
+
+    if((s[0] & 0xE0) == 0xC0 && s[1]) {{
+        unsigned int cp = ((s[0] & 0x1F) << 6) | (s[1] & 0x3F);
+        (*str) += 1;
+        switch(cp) {{
+            case 287: return 0;   /* ğ */
+            case 286: return 1;   /* Ğ */
+            case 252: return 2;   /* ü */
+            case 220: return 3;   /* Ü */
+            case 351: return 4;   /* ş */
+            case 350: return 5;   /* Ş */
+            case 305: return 6;   /* ı */
+            case 304: return 7;   /* İ */
+            case 246: return 8;   /* ö */
+            case 214: return 9;   /* Ö */
+            case 231: return 10;  /* ç */
+            case 199: return 11;  /* Ç */
+            default: return -1;
+        }}
+    }}
+    if((s[0] & 0xF0) == 0xE0 && s[1] && s[2]) {{ (*str) += 2; return -1; }}
+    if((s[0] & 0xF8) == 0xF0 && s[1] && s[2] && s[3]) {{ (*str) += 3; return -1; }}
+    return -1;
+}}
+
+/* Tek ASCII karakter çiz */
 void {output_name}_draw_char(int x, int y, char c, uint32_t color) {{
     if(c < {macro_prefix}_FIRST_CHAR || c > {macro_prefix}_LAST_CHAR) return;
 
@@ -204,7 +292,6 @@ void {output_name}_draw_char(int x, int y, char c, uint32_t color) {{
                 if(alpha >= 250) {{
                     draw_pixel(sx, sy, color);
                 }} else {{
-                    /* Alpha blending (arka plan siyah varsayılarak) */
                     uint8_t nr = (r * alpha) >> 8;
                     uint8_t ng = (g * alpha) >> 8;
                     uint8_t nb = (b * alpha) >> 8;
@@ -215,25 +302,90 @@ void {output_name}_draw_char(int x, int y, char c, uint32_t color) {{
     }}
 }}
 
-/* Metin çiz */
+/* Türkçe karakter çiz */
+void {output_name}_draw_turkish_char(int x, int y, int tr_index, uint32_t color) {{
+    if(tr_index < 0 || tr_index >= {macro_prefix}_TURKISH_COUNT) return;
+
+    const {output_name}_Glyph* glyph = &{output_name}_turkish_glyphs[tr_index];
+    const uint8_t* pixels = &{output_name}_pixels[glyph->offset];
+
+    uint8_t r = (color >> 16) & 0xFF;
+    uint8_t g = (color >> 8) & 0xFF;
+    uint8_t b = color & 0xFF;
+
+    for(int py = 0; py < {macro_prefix}_HEIGHT; py++) {{
+        for(int px = 0; px < glyph->width; px++) {{
+            uint8_t alpha = pixels[py * glyph->width + px];
+            if(alpha > 8) {{
+                int sx = x + px;
+                int sy = y + py;
+
+                if(alpha >= 250) {{
+                    draw_pixel(sx, sy, color);
+                }} else {{
+                    uint8_t nr = (r * alpha) >> 8;
+                    uint8_t ng = (g * alpha) >> 8;
+                    uint8_t nb = (b * alpha) >> 8;
+                    draw_pixel(sx, sy, 0xFF000000 | (nr << 16) | (ng << 8) | nb);
+                }}
+            }}
+        }}
+    }}
+}}
+
+/* Türkçe karakter genişliği */
+int {output_name}_turkish_char_width(int tr_index) {{
+    if(tr_index < 0 || tr_index >= {macro_prefix}_TURKISH_COUNT) return 0;
+    return {output_name}_turkish_glyphs[tr_index].width;
+}}
+
+/* Metin çiz (UTF-8 ve Türkçe destekli) */
 void {output_name}_draw_text(int x, int y, const char* text, uint32_t color) {{
     int cx = x;
     while(*text) {{
-        char c = *text++;
+        unsigned char c = (unsigned char)*text;
+
+        /* UTF-8 multi-byte kontrolü */
+        if(c >= 0x80) {{
+            int tr_idx = {output_name}_utf8_to_turkish(&text);
+            text++;
+            if(tr_idx >= 0) {{
+                {output_name}_draw_turkish_char(cx, y, tr_idx, color);
+                cx += {output_name}_turkish_glyphs[tr_idx].width;
+            }} else {{
+                cx += {output_name}_glyphs[0].width;
+            }}
+            continue;
+        }}
+
+        text++;
         if(c < {macro_prefix}_FIRST_CHAR || c > {macro_prefix}_LAST_CHAR) {{
             cx += {output_name}_glyphs[0].width;
             continue;
         }}
-        {output_name}_draw_char(cx, y, c, color);
+        {output_name}_draw_char(cx, y, (char)c, color);
         cx += {output_name}_glyphs[c - {macro_prefix}_FIRST_CHAR].width;
     }}
 }}
 
-/* Metin genişliğini hesapla */
+/* Metin genişliğini hesapla (UTF-8 ve Türkçe destekli) */
 int {output_name}_text_width(const char* text) {{
     int width = 0;
     while(*text) {{
-        char c = *text++;
+        unsigned char c = (unsigned char)*text;
+
+        if(c >= 0x80) {{
+            int tr_idx = {output_name}_utf8_to_turkish(&text);
+            text++;
+            if(tr_idx >= 0) {{
+                width += {output_name}_turkish_glyphs[tr_idx].width;
+            }} else {{
+                width += {output_name}_glyphs[0].width;
+            }}
+            continue;
+        }}
+
+        text++;
         if(c < {macro_prefix}_FIRST_CHAR || c > {macro_prefix}_LAST_CHAR) {{
             width += {output_name}_glyphs[0].width;
             continue;
@@ -338,26 +490,27 @@ def main():
             print(f"  HATA: {font_file} bulunamadı!")
             continue
 
-        glyphs, font_height = render_font(font_file, font_size)
-        header, c_code = generate_c_code(glyphs, font_height, output_name, description)
+        ascii_glyphs, turkish_glyphs, font_height = render_font(font_file, font_size)
+        header, c_code = generate_c_code(ascii_glyphs, turkish_glyphs, font_height, output_name, description)
 
-        # Dosyaları yaz (fonts/ klasörüne)
-        os.makedirs("../fonts", exist_ok=True)
-        with open(f"../fonts/{output_name}.h", 'w') as f:
+        # Dosyaları yaz (include/fonts ve src/fonts klasörlerine)
+        os.makedirs("../include/fonts", exist_ok=True)
+        os.makedirs("../src/fonts", exist_ok=True)
+        with open(f"../include/fonts/{output_name}.h", 'w') as f:
             f.write(header)
 
-        with open(f"../fonts/{output_name}.c", 'w') as f:
+        with open(f"../src/fonts/{output_name}.c", 'w') as f:
             f.write(c_code)
 
-        print(f"  -> {output_name}.h, {output_name}.c ({font_height}px height)")
+        print(f"  -> include/fonts/{output_name}.h, src/fonts/{output_name}.c ({font_height}px height)")
 
     # Unified header oluştur
     print()
     print("Unified header oluşturuluyor...")
     unified = generate_unified_header(FONT_VARIANTS)
-    with open("../fonts/fonts.h", 'w') as f:
+    with open("../include/fonts/fonts.h", 'w') as f:
         f.write(unified)
-    print("  -> fonts/fonts.h")
+    print("  -> include/fonts/fonts.h")
 
     print()
     print("Tamamlandı!")

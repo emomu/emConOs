@@ -1,444 +1,318 @@
-/* filemgr.c - RetroArch-style File Manager UI */
+/* src/ui/filemgr.c - Tam ve Düzeltilmiş Dosya Yöneticisi */
 #include <ui/filemgr.h>
 #include <ui/theme.h>
-#include <ui/animation.h>
 #include <fs/fat32.h>
 #include <graphics.h>
 #include <fonts/fonts.h>
 #include <types.h>
 
-/* Maksimum değerler */
-#define MAX_VISIBLE_FILES   10
-#define MAX_FILES           256
+/* --- AYARLAR --- */
+#define ITEM_HEIGHT      50
+#define HEADER_HEIGHT    60
+#define FOOTER_HEIGHT    45
+#define MAX_FILES        256
 
-/* Dosya listesi */
+/* --- RENKLER (Flat Design) --- */
+#define COL_BG           0xFF1A1A1A
+#define COL_HEADER       0xFF151515
+#define COL_ITEM_BG      0xFF252525
+#define COL_ITEM_SEL     0xFFE91E63 // Veya g_theme.accent
+#define COL_TEXT_PRI     0xFFFFFFFF
+#define COL_TEXT_SEC     0xFF888888
+#define COL_FOLDER       0xFFE6B800
+#define COL_FILE         0xFFAAAAAA
+
+/* --- YAPILAR --- */
 static struct {
     FileInfo files[MAX_FILES];
     int count;
     int selected;
-    int scroll_offset;
+    
+    /* Scroll Yönetimi */
+    float current_pixel_y;    // Animasyonlu anlık pozisyon
+    float target_pixel_y;     // Hedef pozisyon
+    
     FileMgrState state;
     char current_path[MAX_PATH];
-
-    /* Animasyonlar */
-    Animation scroll_anim;
-    Animation select_anim;
-    float current_scroll;
-    float target_scroll;
 } fm;
 
-/* Dosya tipi renkleri */
-#define COLOR_FOLDER    0xFF4A90D9  /* Mavi */
-#define COLOR_FILE      0xFFCCCCCC  /* Gri */
-#define COLOR_IMAGE     0xFF9B59B6  /* Mor */
-#define COLOR_AUDIO     0xFF27AE60  /* Yeşil */
-#define COLOR_VIDEO     0xFFE74C3C  /* Kırmızı */
-#define COLOR_TEXT      0xFFF39C12  /* Turuncu */
-#define COLOR_ROM       0xFFE91E63  /* Pembe - ROM dosyaları */
+/* --- YARDIMCI FONKSİYONLAR --- */
 
-/* String karşılaştır (case-insensitive, sondan) */
-static int ends_with(const char *str, const char *suffix) {
-    int str_len = 0, suf_len = 0;
-    while(str[str_len]) str_len++;
-    while(suffix[suf_len]) suf_len++;
-
-    if(suf_len > str_len) return 0;
-
-    for(int i = 0; i < suf_len; i++) {
-        char a = str[str_len - suf_len + i];
-        char b = suffix[i];
-        if(a >= 'A' && a <= 'Z') a += 32;
-        if(b >= 'A' && b <= 'Z') b += 32;
-        if(a != b) return 0;
-    }
-    return 1;
+/* Matematik kütüphanesiz Lerp (Yumuşak Geçiş) */
+static float fm_lerp(float start, float end, float t) {
+    return start + (end - start) * t;
 }
 
-/* Dosya tipi rengini al */
-static uint32_t get_file_color(const FileInfo *info) {
-    if(info->is_dir) return COLOR_FOLDER;
-
-    /* ROM dosyaları */
-    if(ends_with(info->name, ".nes") || ends_with(info->name, ".smc") ||
-       ends_with(info->name, ".sfc") || ends_with(info->name, ".gb") ||
-       ends_with(info->name, ".gbc") || ends_with(info->name, ".gba") ||
-       ends_with(info->name, ".md") || ends_with(info->name, ".bin")) {
-        return COLOR_ROM;
-    }
-
-    /* Resim dosyaları */
-    if(ends_with(info->name, ".png") || ends_with(info->name, ".jpg") ||
-       ends_with(info->name, ".bmp") || ends_with(info->name, ".gif")) {
-        return COLOR_IMAGE;
-    }
-
-    /* Ses dosyaları */
-    if(ends_with(info->name, ".mp3") || ends_with(info->name, ".wav") ||
-       ends_with(info->name, ".ogg") || ends_with(info->name, ".flac")) {
-        return COLOR_AUDIO;
-    }
-
-    /* Video dosyaları */
-    if(ends_with(info->name, ".mp4") || ends_with(info->name, ".avi") ||
-       ends_with(info->name, ".mkv") || ends_with(info->name, ".mov")) {
-        return COLOR_VIDEO;
-    }
-
-    /* Metin dosyaları */
-    if(ends_with(info->name, ".txt") || ends_with(info->name, ".cfg") ||
-       ends_with(info->name, ".ini") || ends_with(info->name, ".log")) {
-        return COLOR_TEXT;
-    }
-
-    return COLOR_FILE;
-}
-
-/* Klasör ikonu çiz (RetroArch style) */
-static void draw_folder_icon(int x, int y, uint32_t color) {
-    /* Klasör şekli */
-    draw_rect(x, y + 6, 22, 16, color);
-    draw_rect(x, y + 3, 10, 5, color);
-
-    /* Gölge */
-    draw_rect(x + 2, y + 20, 20, 2, theme_color_darken(color, 0.3f));
-}
-
-/* Dosya ikonu çiz (RetroArch style) */
-static void draw_file_icon(int x, int y, uint32_t color) {
-    Theme *t = theme_get();
-
-    /* Dosya şekli */
-    draw_rect(x + 3, y + 2, 16, 20, color);
-
-    /* Köşe katlanması */
-    draw_rect(x + 15, y + 2, 4, 5, t->bg_dark);
-    draw_rect(x + 15, y + 2, 4, 1, theme_color_lighten(color, 0.2f));
-    draw_rect(x + 18, y + 2, 1, 5, theme_color_lighten(color, 0.2f));
-}
-
-/* FileInfo kopyala */
-static void copy_fileinfo(FileInfo *dest, const FileInfo *src) {
-    int i;
-    for(i = 0; i < MAX_FILENAME && src->name[i]; i++) {
-        dest->name[i] = src->name[i];
-    }
-    dest->name[i] = 0;
-    dest->size = src->size;
-    dest->cluster = src->cluster;
-    dest->attr = src->attr;
-    dest->is_dir = src->is_dir;
-    dest->date = src->date;
-    dest->time = src->time;
-}
-
-/* String kopyalama */
+/* Basit string kopyalama */
 static void str_copy_simple(char *dest, const char *src) {
     while(*src) *dest++ = *src++;
     *dest = 0;
 }
 
-/* Demo dosyaları ekle (QEMU test için) */
+/* Demo dosyaları (SD kart yoksa gösterilecekler) */
 static void add_demo_files(void) {
-    /* Klasörler */
-    str_copy_simple(fm.files[0].name, "NES");
-    fm.files[0].is_dir = 1; fm.files[0].size = 0; fm.count++;
-
-    str_copy_simple(fm.files[1].name, "SNES");
-    fm.files[1].is_dir = 1; fm.files[1].size = 0; fm.count++;
-
-    str_copy_simple(fm.files[2].name, "Mega Drive");
-    fm.files[2].is_dir = 1; fm.files[2].size = 0; fm.count++;
-
-    str_copy_simple(fm.files[3].name, "Game Boy");
-    fm.files[3].is_dir = 1; fm.files[3].size = 0; fm.count++;
-
-    str_copy_simple(fm.files[4].name, "GBA");
-    fm.files[4].is_dir = 1; fm.files[4].size = 0; fm.count++;
-
-    /* ROM dosyaları */
-    str_copy_simple(fm.files[5].name, "mario.nes");
-    fm.files[5].is_dir = 0; fm.files[5].size = 40976; fm.count++;
-
-    str_copy_simple(fm.files[6].name, "zelda.smc");
-    fm.files[6].is_dir = 0; fm.files[6].size = 1048576; fm.count++;
-
-    str_copy_simple(fm.files[7].name, "sonic.md");
-    fm.files[7].is_dir = 0; fm.files[7].size = 524288; fm.count++;
-
-    str_copy_simple(fm.files[8].name, "pokemon.gb");
-    fm.files[8].is_dir = 0; fm.files[8].size = 1048576; fm.count++;
-
-    str_copy_simple(fm.files[9].name, "metroid.gba");
-    fm.files[9].is_dir = 0; fm.files[9].size = 8388608; fm.count++;
-
-    /* Diğer dosyalar */
-    str_copy_simple(fm.files[10].name, "readme.txt");
-    fm.files[10].is_dir = 0; fm.files[10].size = 1024; fm.count++;
-
-    str_copy_simple(fm.files[11].name, "config.ini");
-    fm.files[11].is_dir = 0; fm.files[11].size = 256; fm.count++;
+    fm.count = 0;
+    const char *demos[] = { 
+        "NES", "SNES", "GBA", "Mega Drive", "MAME", "NeoGeo", 
+        "mario.nes", "zelda.smc", "sonic.md", "pokemon.gb", 
+        "doom.exe", "readme.txt", "system.cfg", "bios.bin" 
+    };
+    
+    for(int i = 0; i < 14; i++) {
+        str_copy_simple(fm.files[i].name, demos[i]);
+        fm.files[i].is_dir = (i < 6); // İlk 6 tanesi klasör
+        fm.files[i].size = 1024 * (i * i + 1); // Rastgele boyut
+        fm.count++;
+    }
 }
 
-/* Dosya yöneticisi başlat */
+/* Flat İkon Çizimi */
+static void draw_flat_icon(int x, int y, int is_dir) {
+    if(is_dir) {
+        /* Klasör (Sarı) */
+        draw_rect(x, y + 2, 24, 18, COL_FOLDER);
+        draw_rect(x, y, 10, 4, COL_FOLDER);
+    } else {
+        /* Dosya (Gri) */
+        draw_rect(x + 4, y, 16, 22, COL_FILE);
+        draw_rect(x + 16, y, 4, 4, 0xFF555555); // Kıvrık köşe
+    }
+}
+
+/* --- INIT --- */
+
 void filemgr_init(void) {
     fm.count = 0;
     fm.selected = 0;
-    fm.scroll_offset = 0;
+    fm.current_pixel_y = 0;
+    fm.target_pixel_y = 0;
     fm.state = FM_STATE_LOADING;
+    
     fm.current_path[0] = '/';
     fm.current_path[1] = 0;
-    fm.current_scroll = 0;
-    fm.target_scroll = 0;
 
-    anim_init(&fm.scroll_anim);
-    anim_init(&fm.select_anim);
-
-    /* FAT32 başlat */
+    /* FAT32 Başlatmayı Dene */
     if(fat32_init() != FAT_OK) {
-        /* SD kart yok - demo dosyaları göster */
         add_demo_files();
         fm.state = FM_STATE_READY;
         return;
     }
 
-    /* Dizini oku */
     if(fat32_open_dir("/") != FAT_OK) {
         add_demo_files();
         fm.state = FM_STATE_READY;
         return;
     }
 
+    /* Dosyaları Oku */
     FileInfo info;
     while(fat32_read_dir(&info) == FAT_OK && fm.count < MAX_FILES) {
-        copy_fileinfo(&fm.files[fm.count], &info);
+        int i;
+        for(i = 0; i < MAX_FILENAME && info.name[i]; i++) {
+            fm.files[fm.count].name[i] = info.name[i];
+        }
+        fm.files[fm.count].name[i] = 0;
+        fm.files[fm.count].size = info.size;
+        fm.files[fm.count].is_dir = info.is_dir;
         fm.count++;
     }
-
     fat32_close_dir();
 
-    if(fm.count == 0) {
-        add_demo_files();
-    }
-
+    if(fm.count == 0) add_demo_files();
     fm.state = FM_STATE_READY;
 }
 
-/* Dosya yöneticisi çiz (RetroArch style) */
+/* --- DRAW --- */
+
 void filemgr_draw(void) {
-    Theme *t = theme_get();
+    /* 1. Arka Planı Temizle */
+    draw_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, COL_BG);
 
-    /* Arka plan */
-    clear_screen(t->bg_dark);
+    /* --- LİSTE ÇİZİMİ (EN ALTA) --- */
+    /* Header ve Footer'ın arkasında kalsın diye önce çiziyoruz */
 
-    /* Header */
-    draw_rect(0, 0, SCREEN_WIDTH, 50, t->header_bg);
-    draw_text_20_bold(20, 12, "Dosya Yoneticisi", t->text_primary);
+    int list_start_y = HEADER_HEIGHT + 10;
+    int list_visible_h = SCREEN_HEIGHT - HEADER_HEIGHT - FOOTER_HEIGHT; 
+    
+    /* Animasyon */
+    fm.current_pixel_y = fm_lerp(fm.current_pixel_y, fm.target_pixel_y, 0.2f);
 
-    /* Breadcrumb (path) */
-    draw_text_16(SCREEN_WIDTH - 100, 17, fm.current_path, t->text_secondary);
+    /* Layout (Hizalama) */
+    int side_padding = 15;
+    int scrollbar_width = 8;
+    int scrollbar_gap = 5;
+    
+    // Öğelerin genişliğini scrollbar'a çarpmayacak şekilde ayarla
+    int item_w = SCREEN_WIDTH - (side_padding * 2) - scrollbar_width - scrollbar_gap;
+    int start_x = side_padding;
 
-    /* Accent line */
-    draw_rect(0, 49, SCREEN_WIDTH, 2, t->accent);
+    for(int i = 0; i < fm.count; i++) {
+        /* Y Koordinatı Hesabı */
+        float y = (i * ITEM_HEIGHT) - fm.current_pixel_y + list_start_y;
 
-    /* Hata durumu */
-    if(fm.state == FM_STATE_ERROR) {
-        draw_text_20(50, 200, "SD kart okunamadi!", t->error);
-        draw_text_16(50, 240, "Lutfen SD karti kontrol edin.", t->text_secondary);
-        return;
-    }
+        /* Ekrana girmeyenleri çizme (Culling) */
+        /* Performans için kritik */
+        if(y < -ITEM_HEIGHT || y > SCREEN_HEIGHT) continue;
 
-    /* Yükleniyor */
-    if(fm.state == FM_STATE_LOADING) {
-        draw_text_20(50, 200, "Yukleniyor...", t->text_primary);
-        return;
-    }
+        int is_selected = (i == fm.selected);
+        FileInfo *file = &fm.files[i];
 
-    /* Boş dizin */
-    if(fm.count == 0) {
-        draw_text_20(50, 200, "Dizin bos", t->text_disabled);
-        return;
-    }
-
-    /* Dosya listesi alanı */
-    int list_x = 25;
-    int list_y = 65;
-    int item_height = 38;
-
-    /* Smooth scroll */
-    float scroll = fm.current_scroll;
-    if(anim_is_running(&fm.scroll_anim)) {
-        scroll = anim_get_value(&fm.scroll_anim);
-        fm.current_scroll = scroll;
-    }
-
-    /* Görünür dosyaları çiz */
-    for(int i = 0; i < MAX_VISIBLE_FILES + 2 && (fm.scroll_offset + i) < fm.count; i++) {
-        int idx = fm.scroll_offset + i;
-        if(idx < 0) continue;
-
-        FileInfo *file = &fm.files[idx];
-        int y = list_y + i * item_height - (int)(scroll * item_height);
-
-        /* Ekran dışındaysa atla */
-        if(y < 50 || y > SCREEN_HEIGHT - 60) continue;
-
-        int is_selected = (idx == fm.selected);
-
-        /* Seçili satır arka planı */
+        /* Kutu Arka Planı */
         if(is_selected) {
-            /* Gradient-like selection */
-            draw_rect(list_x - 10, y - 3, SCREEN_WIDTH - 50, item_height, t->selected_bg);
-
-            /* Left accent bar */
-            draw_rect(list_x - 10, y - 3, 4, item_height, t->accent);
-
-            /* Outline */
-            draw_rect_outline(list_x - 10, y - 3, SCREEN_WIDTH - 50, item_height, 1, t->accent);
+            draw_rect(start_x, (int)y, item_w, ITEM_HEIGHT - 5, g_theme.accent);
+            draw_rect_outline(start_x, (int)y, item_w, ITEM_HEIGHT - 5, 2, 0xFFFFFFFF);
+        } else {
+            draw_rect(start_x, (int)y, item_w, ITEM_HEIGHT - 5, COL_ITEM_BG);
         }
 
         /* İkon */
-        uint32_t icon_color = get_file_color(file);
-        if(file->is_dir) {
-            draw_folder_icon(list_x, y, icon_color);
-        } else {
-            draw_file_icon(list_x, y, icon_color);
-        }
+        draw_flat_icon(start_x + 10, (int)y + 10, file->is_dir);
 
-        /* Dosya adı */
-        uint32_t text_color = is_selected ? t->text_highlight : t->text_primary;
-        if(!file->is_dir) {
-            /* ROM dosyaları için özel renk */
-            if(ends_with(file->name, ".nes") || ends_with(file->name, ".smc") ||
-               ends_with(file->name, ".gba") || ends_with(file->name, ".gb")) {
-                if(!is_selected) text_color = t->accent_alt;
+        /* Dosya Adı */
+        uint32_t text_color = is_selected ? COL_TEXT_PRI : 0xFFCCCCCC;
+        draw_text_16(start_x + 45, (int)y + 14, file->name, text_color);
+
+        /* Dosya Bilgisi (Sağa Dayalı) */
+        char info[16];
+        if(file->is_dir) {
+            str_copy_simple(info, "<DIR>");
+        } else {
+            /* Boyut Formatla (KB/MB) */
+            int k = file->size / 1024;
+            if(k == 0 && file->size > 0) k = 1; // En az 1KB göster
+            
+            // Basit int -> string çevrimi
+            if(k < 1000) {
+                // 000KB formatı hizalama için güzel durur
+                info[0] = '0' + (k/100)%10; 
+                info[1] = '0' + (k/10)%10; 
+                info[2] = '0' + k%10; 
+                info[3] = 'K'; info[4] = 'B'; info[5] = 0;
+            } else {
+                int m = k / 1024;
+                info[0] = '0' + (m/100)%10; 
+                info[1] = '0' + (m/10)%10; 
+                info[2] = '0' + m%10; 
+                info[3] = 'M'; info[4] = 'B'; info[5] = 0;
             }
         }
-        draw_text_16(list_x + 35, y + 8, file->name, text_color);
-
-        /* Boyut / Tip (sağda) */
-        char info_str[20];
-        if(file->is_dir) {
-            str_copy_simple(info_str, "<DIR>");
-        } else {
-            fat32_format_size(file->size, info_str);
-        }
-        int info_w = text_width_16(info_str);
-        draw_text_16(SCREEN_WIDTH - 60 - info_w, y + 8, info_str, t->text_secondary);
+        
+        uint32_t info_color = is_selected ? 0xFFDDDDDD : COL_TEXT_SEC;
+        draw_text_16(start_x + item_w - 70, (int)y + 14, info, info_color);
     }
 
-    /* Scroll bar */
-    if(fm.count > MAX_VISIBLE_FILES) {
-        int bar_x = SCREEN_WIDTH - 18;
-        int bar_y = 65;
-        int bar_height = SCREEN_HEIGHT - 120;
+    /* --- HEADER (ÜSTE BİNER) --- */
+    /* Liste yukarı kayarken çirkin görünmemesi için opak arka plan çiziyoruz */
+    draw_rect(0, 0, SCREEN_WIDTH, HEADER_HEIGHT, COL_HEADER);
+    draw_rect(0, HEADER_HEIGHT, SCREEN_WIDTH, 1, 0xFF444444); // Alt çizgi
+    
+    draw_text_20_bold(20, 18, "Dosya Yöneticisi", COL_TEXT_PRI);
+    
+    /* Path Kutusu */
+    int path_w = 140;
+    draw_rect(SCREEN_WIDTH - path_w - 20, 15, path_w, 30, COL_ITEM_BG);
+    draw_text_16(SCREEN_WIDTH - path_w - 10, 20, fm.current_path, COL_TEXT_SEC);
 
-        /* Track */
-        draw_rect(bar_x, bar_y, 10, bar_height, t->bg_medium);
+    /* --- FOOTER (ÜSTE BİNER) --- */
+    int footer_y = SCREEN_HEIGHT - FOOTER_HEIGHT;
+    draw_rect(0, footer_y, SCREEN_WIDTH, FOOTER_HEIGHT, COL_HEADER);
+    // draw_rect(0, footer_y, SCREEN_WIDTH, 1, 0xFF333333); // İsteğe bağlı üst çizgi
 
-        /* Thumb */
-        int thumb_height = (MAX_VISIBLE_FILES * bar_height) / fm.count;
-        if(thumb_height < 30) thumb_height = 30;
-        int thumb_y = bar_y + (fm.selected * (bar_height - thumb_height)) / (fm.count - 1);
+    /* Öğe Sayısı */
+    // Basitçe statik yazıyoruz, istenirse intToStr eklenebilir
+    draw_text_16(20, footer_y + 12, "Liste Sonu", COL_TEXT_SEC);
 
-        draw_rect(bar_x, thumb_y, 10, thumb_height, t->accent);
+    /* Kontroller */
+    draw_text_16(SCREEN_WIDTH - 200, footer_y + 12, "[A] Aç   [B] Geri", COL_TEXT_SEC);
+
+    /* --- SCROLL BAR (EN ÜSTE) --- */
+    int visible_count = list_visible_h / ITEM_HEIGHT;
+    
+    if(fm.count > visible_count) {
+        int bar_h = list_visible_h - 20;
+        int bar_x = SCREEN_WIDTH - side_padding - scrollbar_width + 5; // En sağa
+        int bar_y = list_start_y + 10;
+
+        /* Ray (Track) */
+        draw_rect(bar_x, bar_y, scrollbar_width, bar_h, COL_ITEM_BG);
+
+        /* Tutacak (Thumb) Boyutu */
+        float ratio = (float)visible_count / fm.count;
+        int thumb_h = (int)(bar_h * ratio);
+        if(thumb_h < 30) thumb_h = 30; // Minimum yükseklik
+
+        /* Tutacak Pozisyonu */
+        float scroll_max = (fm.count * ITEM_HEIGHT) - list_visible_h;
+        if(scroll_max <= 0) scroll_max = 1;
+        
+        float scroll_percent = fm.current_pixel_y / scroll_max;
+        if(scroll_percent < 0) scroll_percent = 0;
+        if(scroll_percent > 1) scroll_percent = 1;
+
+        int thumb_y = bar_y + (int)((bar_h - thumb_h) * scroll_percent);
+        
+        /* Tutacağı Çiz */
+        draw_rect(bar_x, thumb_y, scrollbar_width, thumb_h, g_theme.accent);
     }
 
-    /* Footer */
-    draw_rect(0, SCREEN_HEIGHT - 45, SCREEN_WIDTH, 45, t->footer_bg);
-    draw_rect(0, SCREEN_HEIGHT - 45, SCREEN_WIDTH, 1, t->accent);
-
-    /* Dosya sayısı */
-    char count_str[32] = "Toplam: ";
-    int num = fm.count;
-    char tmp[16];
-    int j = 0;
-    if(num == 0) {
-        tmp[j++] = '0';
-    } else {
-        while(num > 0) {
-            tmp[j++] = '0' + (num % 10);
-            num /= 10;
-        }
-    }
-    int len = 8;
-    while(j > 0) {
-        count_str[len++] = tmp[--j];
-    }
-    count_str[len++] = ' ';
-    count_str[len++] = 'o';
-    count_str[len++] = 'g';
-    count_str[len++] = 'e';
-    count_str[len] = 0;
-
-    draw_text_16(20, SCREEN_HEIGHT - 30, count_str, t->text_secondary);
-
-    /* Kontrol ipuçları */
-    draw_text_16(SCREEN_WIDTH - 180, SCREEN_HEIGHT - 30, "A:Ac  B:Geri", t->text_secondary);
-
-    /* Memory barrier */
+    /* Memory Barrier (Görüntü yırtılmasını önler) */
     __asm__ volatile("dsb sy");
 }
 
-/* Yukarı git */
+/* --- GÜNCELLEME ve KONTROL --- */
+
+/* Scroll Hedefini Güncelle (Smart Scrolling) */
+static void update_scroll_target(void) {
+    int list_h = SCREEN_HEIGHT - HEADER_HEIGHT - FOOTER_HEIGHT - 20;
+    
+    int selected_y_top = fm.selected * ITEM_HEIGHT;
+    int selected_y_bottom = selected_y_top + ITEM_HEIGHT;
+
+    int view_top = (int)fm.target_pixel_y;
+    int view_bottom = view_top + list_h;
+
+    /* Görünür alanda tut */
+    if(selected_y_top < view_top) {
+        fm.target_pixel_y = selected_y_top;
+    } else if(selected_y_bottom > view_bottom) {
+        fm.target_pixel_y = selected_y_bottom - list_h;
+    }
+
+    /* Sınırları aşma */
+    int max_scroll = (fm.count * ITEM_HEIGHT) - list_h;
+    if(max_scroll < 0) max_scroll = 0;
+    
+    if(fm.target_pixel_y < 0) fm.target_pixel_y = 0;
+    if(fm.target_pixel_y > max_scroll) fm.target_pixel_y = max_scroll;
+}
+
+void filemgr_update(void) {
+    /* Animasyonlar draw içinde lerp ile hallediliyor */
+}
+
 void filemgr_up(void) {
     if(fm.selected > 0) {
         fm.selected--;
-
-        /* Scroll animasyonu */
-        if(fm.selected < fm.scroll_offset) {
-            fm.scroll_offset = fm.selected;
-            float current = fm.current_scroll;
-            anim_start(&fm.scroll_anim, current, 0, 150, EASE_OUT_QUAD);
-        }
+        update_scroll_target();
     }
 }
 
-/* Aşağı git */
 void filemgr_down(void) {
     if(fm.selected < fm.count - 1) {
         fm.selected++;
-
-        /* Scroll animasyonu */
-        if(fm.selected >= fm.scroll_offset + MAX_VISIBLE_FILES) {
-            fm.scroll_offset = fm.selected - MAX_VISIBLE_FILES + 1;
-            float current = fm.current_scroll;
-            anim_start(&fm.scroll_anim, current, 0, 150, EASE_OUT_QUAD);
-        }
+        update_scroll_target();
     }
 }
 
-/* Seçili öğeyi aç */
 void filemgr_enter(void) {
-    if(fm.count == 0) return;
-
-    FileInfo *file = &fm.files[fm.selected];
-
-    if(file->is_dir) {
-        /* Dizine gir (şimdilik sadece root destekleniyor) */
-        /* TODO: Alt dizin desteği */
-    } else {
-        /* Dosyayı aç */
-        /* TODO: ROM başlatma */
-    }
+    /* Seçim işlemi (TODO) */
 }
 
-/* Geri git */
 void filemgr_back(void) {
-    /* Üst dizine git */
-    /* TODO: Navigasyon geçmişi */
+    /* Geri gitme işlemi (TODO) */
 }
 
-/* Durum al */
-FileMgrState filemgr_get_state(void) {
-    return fm.state;
-}
-
-/* Dosya sayısı al */
-int filemgr_get_file_count(void) {
-    return fm.count;
-}
-
-/* Seçili indeks al */
-int filemgr_get_selected(void) {
-    return fm.selected;
-}
+/* --- GETTERLAR --- */
+FileMgrState filemgr_get_state(void) { return fm.state; }
+int filemgr_get_file_count(void) { return fm.count; }
+int filemgr_get_selected(void) { return fm.selected; }
