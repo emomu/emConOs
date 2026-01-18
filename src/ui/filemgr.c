@@ -61,6 +61,9 @@ static int img_width = 0;
 static int img_height = 0;
 static int img_loaded = 0;
 
+/* BMP row buffer - stack overflow önleme */
+static uint8_t bmp_row_buf[MAX_IMG_WIDTH * 4 + 4];
+
 /* --- YARDIMCI FONKSİYONLAR --- */
 
 /* String kopyalama */
@@ -243,7 +246,12 @@ static int open_bmp_file(const char *filename) {
         }
     }
 
+    uart_puts("[BMP] fat32_open OK, fd=");
+    uart_hex(fd);
+    uart_puts("\n");
+
     /* BMP header'ı oku (54 byte) */
+    uart_puts("[BMP] Reading header...\n");
     uint8_t header[54];
     if(fat32_read(fd, header, 54) != 54) {
         uart_puts("[BMP] Failed to read header\n");
@@ -298,13 +306,12 @@ static int open_bmp_file(const char *filename) {
 
     /* Row padding (4 byte boundary) */
     int row_size = ((width * (bpp / 8) + 3) / 4) * 4;
-    uint8_t row_buf[MAX_IMG_WIDTH * 4 + 4];
 
-    /* Her satırı oku */
+    /* Her satırı oku - statik bmp_row_buf kullan */
     for(int y = 0; y < height; y++) {
         int dest_y = top_down ? y : (height - 1 - y);
 
-        if(fat32_read(fd, row_buf, row_size) != row_size) {
+        if(fat32_read(fd, bmp_row_buf, row_size) != row_size) {
             uart_puts("[BMP] Failed to read row\n");
             fat32_close(fd);
             return -1;
@@ -316,10 +323,10 @@ static int open_bmp_file(const char *filename) {
             int dst_idx = (dest_y * MAX_IMG_WIDTH + x) * 4;
 
             /* BMP: BGR(A) formatında */
-            img_buffer[dst_idx + 0] = row_buf[src_idx + 2];  /* R */
-            img_buffer[dst_idx + 1] = row_buf[src_idx + 1];  /* G */
-            img_buffer[dst_idx + 2] = row_buf[src_idx + 0];  /* B */
-            img_buffer[dst_idx + 3] = (bpp == 32) ? row_buf[src_idx + 3] : 255;  /* A */
+            img_buffer[dst_idx + 0] = bmp_row_buf[src_idx + 2];  /* R */
+            img_buffer[dst_idx + 1] = bmp_row_buf[src_idx + 1];  /* G */
+            img_buffer[dst_idx + 2] = bmp_row_buf[src_idx + 0];  /* B */
+            img_buffer[dst_idx + 3] = (bpp == 32) ? bmp_row_buf[src_idx + 3] : 255;  /* A */
         }
     }
 

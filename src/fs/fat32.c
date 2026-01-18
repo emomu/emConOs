@@ -54,6 +54,7 @@ typedef struct __attribute__((packed)) {
 /* FAT32 global durumu */
 static struct {
     uint8_t  mounted;
+    uint32_t partition_start;     /* Partition başlangıç sektörü (MBR için) */
     uint32_t fat_start;           /* FAT başlangıç sektörü */
     uint32_t data_start;          /* Veri bölgesi başlangıcı */
     uint32_t root_cluster;        /* Kök dizin cluster'ı */
@@ -180,11 +181,10 @@ static void convert_83_to_name(const char *name83, char *name) {
 
 /* Statik buffer - stack overflow önleme */
 static uint8_t boot_sector_buffer[512];
+static uint8_t file_sector_buffer[512];  /* fat32_read için */
 
 /* FAT32 başlat */
 int fat32_init(void) {
-    FAT32BootSector *bs;
-
     uart_puts("FAT32 baslatiliyor...\n");
 
     /* SD kart başlatılmış mı? */
@@ -195,36 +195,65 @@ int fat32_init(void) {
         }
     }
 
-    /* Boot sector oku */
-    uart_puts("FAT32: Boot sector okunuyor...\n");
+    /* Sector 0 oku - MBR veya VBR olabilir */
+    uart_puts("FAT32: Sector 0 okunuyor...\n");
     int read_result = sd_read_block(0, boot_sector_buffer);
-    uart_puts("FAT32: sd_read_block sonuc: ");
-    uart_hex(read_result);
-    uart_puts("\n");
     if(read_result != SD_OK) {
-        uart_puts("FAT32: Boot sector okunamadi\n");
+        uart_puts("FAT32: Sector 0 okunamadi\n");
         return FAT_ERROR;
     }
-    uart_puts("FAT32: Boot sector okundu\n");
 
-    /* İlk birkaç byte'ı kontrol et */
-    uart_puts("FAT32: Buffer[0-2]: ");
-    uart_hex(boot_sector_buffer[0]);
+    volatile uint8_t *buf = boot_sector_buffer;
+    uint32_t partition_start = 0;
+
+    /* MBR mi VBR mi kontrol et */
+    /* MBR signature: 0x55AA at offset 510 */
+    /* MBR'da offset 0'da jump instruction (0xEB veya 0xE9) olmaz genelde */
+    /* VBR'da (FAT boot sector) offset 0'da 0xEB xx 0x90 veya 0xE9 olur */
+
+    uart_puts("FAT32: Sector0[0]: ");
+    uart_hex(buf[0]);
+    uart_puts(" [510-511]: ");
+    uart_hex(buf[510]);
     uart_puts(" ");
-    uart_hex(boot_sector_buffer[1]);
-    uart_puts(" ");
-    uart_hex(boot_sector_buffer[2]);
+    uart_hex(buf[511]);
     uart_puts("\n");
 
-    /* Değerleri doğrudan buffer'dan oku (packed struct sorununu önle) */
-    uart_puts("FAT32: Reading bytes_per_sector...\n");
+    /* MBR partition table kontrolü */
+    /* Partition 1 entry: offset 446, type at offset 450 */
+    uint8_t part1_type = buf[450];
+    uint32_t part1_lba = buf[454] | ((uint32_t)buf[455] << 8) |
+                         ((uint32_t)buf[456] << 16) | ((uint32_t)buf[457] << 24);
 
-    /* Volatile pointer kullan - derleyici optimizasyonunu önle */
-    volatile uint8_t *buf = boot_sector_buffer;
+    uart_puts("FAT32: Part1 type: ");
+    uart_hex(part1_type);
+    uart_puts(" LBA: ");
+    uart_hex(part1_lba);
+    uart_puts("\n");
 
+    /* FAT32 partition type: 0x0B veya 0x0C (LBA) */
+    if((part1_type == 0x0B || part1_type == 0x0C) && part1_lba > 0) {
+        uart_puts("FAT32: MBR bulundu, partition LBA: ");
+        uart_hex(part1_lba);
+        uart_puts("\n");
+        partition_start = part1_lba;
+
+        /* Partition'ın VBR'ını oku */
+        read_result = sd_read_block(partition_start, boot_sector_buffer);
+        if(read_result != SD_OK) {
+            uart_puts("FAT32: Partition VBR okunamadi\n");
+            return FAT_ERROR;
+        }
+        buf = boot_sector_buffer;
+    } else {
+        uart_puts("FAT32: Superfloppy format (MBR yok)\n");
+        partition_start = 0;
+    }
+
+    fat32.partition_start = partition_start;
+
+    /* Boot sector değerlerini oku */
     uint16_t bytes_per_sector = buf[11] | ((uint16_t)buf[12] << 8);
-    uart_puts("FAT32: bps read done\n");
-
     uint8_t sectors_per_cluster = buf[13];
     uint16_t reserved_sectors = buf[14] | ((uint16_t)buf[15] << 8);
     uint8_t fat_count = buf[16];
@@ -253,7 +282,7 @@ int fat32_init(void) {
     fat32.bytes_per_sector = bytes_per_sector;
     fat32.sectors_per_cluster = sectors_per_cluster;
     fat32.cluster_size = bytes_per_sector * sectors_per_cluster;
-    fat32.fat_start = reserved_sectors;
+    fat32.fat_start = partition_start + reserved_sectors;
     fat32.fat_size = fat_size_32;
     fat32.data_start = fat32.fat_start + (fat_count * fat32.fat_size);
     fat32.root_cluster = root_cluster;
@@ -576,6 +605,10 @@ int fat32_close_dir(void) {
 int fat32_open(const char *path, uint8_t mode) {
     if(!fat32.mounted) return -1;
 
+    uart_puts("[FAT32] open: ");
+    uart_puts((char*)path);
+    uart_puts("\n");
+
     /* Boş slot bul */
     int fd = -1;
     for(int i = 0; i < MAX_OPEN_FILES; i++) {
@@ -586,15 +619,52 @@ int fat32_open(const char *path, uint8_t mode) {
     }
     if(fd < 0) return -1;
 
-    /* Dosyayı bul (basitleştirilmiş - sadece root) */
-    if(fat32_open_dir("/") != FAT_OK) return -1;
+    /* Path'i parçala: dizin + dosya adı */
+    const char *p = path;
+    if(*p == '/') p++;
+
+    /* Son / karakterini bul */
+    const char *last_slash = 0;
+    const char *tmp = p;
+    while(*tmp) {
+        if(*tmp == '/') last_slash = tmp;
+        tmp++;
+    }
+
+    /* Dizin path'i ve dosya adı */
+    char dir_path[128];
+    const char *filename;
+
+    if(last_slash) {
+        /* Alt dizinde dosya var */
+        int dir_len = last_slash - p;
+        dir_path[0] = '/';
+        for(int i = 0; i < dir_len && i < 126; i++) {
+            dir_path[i + 1] = p[i];
+        }
+        dir_path[dir_len + 1] = 0;
+        filename = last_slash + 1;
+    } else {
+        /* Root dizininde */
+        dir_path[0] = '/';
+        dir_path[1] = 0;
+        filename = p;
+    }
+
+    uart_puts("[FAT32] dir: ");
+    uart_puts(dir_path);
+    uart_puts(" file: ");
+    uart_puts((char*)filename);
+    uart_puts("\n");
+
+    /* Dizini aç */
+    if(fat32_open_dir(dir_path) != FAT_OK) {
+        uart_puts("[FAT32] open_dir failed\n");
+        return -1;
+    }
 
     FileInfo info;
     int found = 0;
-
-    /* Dosya adını path'ten çıkar */
-    const char *filename = path;
-    if(filename[0] == '/') filename++;
 
     while(fat32_read_dir(&info) == FAT_OK) {
         /* İsim karşılaştır (case-insensitive) */
@@ -607,15 +677,28 @@ int fat32_open(const char *path, uint8_t mode) {
             }
             i++;
         }
-        if(match && !filename[i] && !info.name[i]) {
+        if(match && !filename[i] && !info.name[i] && !info.is_dir) {
             found = 1;
+            uart_puts("[FAT32] Found file: ");
+            uart_puts(info.name);
+            uart_puts(" cluster=");
+            uart_hex(info.cluster);
+            uart_puts(" size=");
+            uart_hex(info.size);
+            uart_puts("\n");
             break;
         }
     }
 
+    uart_puts("[FAT32] closing dir\n");
     fat32_close_dir();
 
-    if(!found) return -1;
+    if(!found) {
+        uart_puts("[FAT32] file not found\n");
+        return -1;
+    }
+
+    uart_puts("[FAT32] setting up file handle\n");
 
     /* Dosyayı aç */
     open_files[fd].used = 1;
@@ -625,18 +708,33 @@ int fat32_open(const char *path, uint8_t mode) {
     open_files[fd].size = info.size;
     open_files[fd].mode = mode;
 
+    uart_puts("[FAT32] open complete, fd=");
+    uart_hex(fd);
+    uart_puts("\n");
+
     return fd;
 }
 
 /* Dosyadan oku */
 int fat32_read(int fd, void *buffer, uint32_t size) {
+    uart_puts("[READ] fd=");
+    uart_hex(fd);
+    uart_puts(" size=");
+    uart_hex(size);
+    uart_puts("\n");
+
     if(fd < 0 || fd >= MAX_OPEN_FILES) return -1;
     if(!open_files[fd].used) return -1;
 
     File *f = &open_files[fd];
     uint8_t *buf = (uint8_t*)buffer;
     uint32_t bytes_read = 0;
-    uint8_t sector_buffer[512];
+
+    uart_puts("[READ] cluster=");
+    uart_hex(f->cluster);
+    uart_puts(" pos=");
+    uart_hex(f->position);
+    uart_puts("\n");
 
     while(bytes_read < size && f->position < f->size) {
         /* Cluster içindeki pozisyon */
@@ -644,9 +742,14 @@ int fat32_read(int fd, void *buffer, uint32_t size) {
         uint32_t sector_offset = cluster_offset / 512;
         uint32_t byte_offset = cluster_offset % 512;
 
-        /* Sektörü oku */
+        /* Sektörü oku - statik buffer kullan */
         uint32_t sector = cluster_to_sector(f->cluster) + sector_offset;
-        if(sd_read_block(sector, sector_buffer) != SD_OK) {
+        uart_puts("[READ] sector=");
+        uart_hex(sector);
+        uart_puts("\n");
+
+        if(sd_read_block(sector, file_sector_buffer) != SD_OK) {
+            uart_puts("[READ] sd_read_block FAILED\n");
             return bytes_read > 0 ? bytes_read : -1;
         }
 
@@ -660,7 +763,7 @@ int fat32_read(int fd, void *buffer, uint32_t size) {
 
         /* Kopyala */
         for(uint32_t i = 0; i < to_copy; i++) {
-            buf[bytes_read++] = sector_buffer[byte_offset + i];
+            buf[bytes_read++] = file_sector_buffer[byte_offset + i];
         }
         f->position += to_copy;
 
