@@ -65,7 +65,12 @@ static void handle_files_input(void) {
         filemgr_enter();
     }
     if(btn_just_pressed(BTN_B)) {
-        switch_screen(SCREEN_MAIN);
+        /* Root'taysak ana menüye dön, değilse üst dizine git */
+        if(filemgr_is_at_root()) {
+            switch_screen(SCREEN_MAIN);
+        } else {
+            filemgr_back();
+        }
     }
 }
 

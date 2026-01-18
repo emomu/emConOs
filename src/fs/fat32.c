@@ -69,6 +69,11 @@ static struct {
     uint32_t cluster;
     uint32_t entry_index;
     uint8_t  sector_buffer[512];
+    /* LFN desteği */
+    char     lfn_buffer[256];   /* Uzun dosya ismi */
+    int      lfn_index;         /* LFN buffer'daki pozisyon */
+    uint8_t  lfn_checksum;      /* LFN checksum doğrulama */
+    int      lfn_valid;         /* LFN geçerli mi? */
 } dir_state;
 
 /* Açık dosyalar */
@@ -101,6 +106,58 @@ static uint32_t get_next_cluster(uint32_t cluster) {
     return next & 0x0FFFFFFF;
 }
 
+/* Yardımcı: 8.3 ismi için checksum hesapla (LFN doğrulama) */
+static uint8_t lfn_checksum(const uint8_t *name83) {
+    uint8_t sum = 0;
+    for(int i = 0; i < 11; i++) {
+        sum = ((sum & 1) ? 0x80 : 0) + (sum >> 1) + name83[i];
+    }
+    return sum;
+}
+
+/* Yardımcı: LFN entry'den tek karakter oku */
+static char lfn_read_char(volatile uint8_t *entry, int idx) {
+    /* LFN pozisyonları: 1,3,5,7,9 (5), 14,16,18,20,22,24 (6), 28,30 (2) = 13 */
+    /* idx: 0-4 -> offset 1,3,5,7,9 */
+    /* idx: 5-10 -> offset 14,16,18,20,22,24 */
+    /* idx: 11-12 -> offset 28,30 */
+
+    if(idx < 0 || idx > 12) return 0;
+
+    int offset;
+    if(idx < 5) {
+        offset = 1 + idx * 2;
+    } else if(idx < 11) {
+        offset = 14 + (idx - 5) * 2;
+    } else {
+        offset = 28 + (idx - 11) * 2;
+    }
+
+    /* Byte-by-byte oku - alignment sorununu önle */
+    uint8_t lo = entry[offset];
+    uint8_t hi = entry[offset + 1];
+    uint16_t ch = lo | ((uint16_t)hi << 8);
+
+    if(ch == 0x0000 || ch == 0xFFFF) return 0;
+    if(ch < 128) return (char)ch;
+
+    /* Türkçe karakterler */
+    if(ch == 0x00E7) return 'c';  /* ç */
+    if(ch == 0x00C7) return 'C';  /* Ç */
+    if(ch == 0x011F) return 'g';  /* ğ */
+    if(ch == 0x011E) return 'G';  /* Ğ */
+    if(ch == 0x0131) return 'i';  /* ı */
+    if(ch == 0x0130) return 'I';  /* İ */
+    if(ch == 0x00F6) return 'o';  /* ö */
+    if(ch == 0x00D6) return 'O';  /* Ö */
+    if(ch == 0x015F) return 's';  /* ş */
+    if(ch == 0x015E) return 'S';  /* Ş */
+    if(ch == 0x00FC) return 'u';  /* ü */
+    if(ch == 0x00DC) return 'U';  /* Ü */
+
+    return '_';
+}
+
 /* Yardımcı: 8.3 ismini düzgün isme çevir */
 static void convert_83_to_name(const char *name83, char *name) {
     int i, j = 0;
@@ -121,10 +178,12 @@ static void convert_83_to_name(const char *name83, char *name) {
     name[j] = 0;
 }
 
+/* Statik buffer - stack overflow önleme */
+static uint8_t boot_sector_buffer[512];
+
 /* FAT32 başlat */
 int fat32_init(void) {
     FAT32BootSector *bs;
-    uint8_t buffer[512];
 
     uart_puts("FAT32 baslatiliyor...\n");
 
@@ -137,27 +196,67 @@ int fat32_init(void) {
     }
 
     /* Boot sector oku */
-    if(sd_read_block(0, buffer) != SD_OK) {
+    uart_puts("FAT32: Boot sector okunuyor...\n");
+    int read_result = sd_read_block(0, boot_sector_buffer);
+    uart_puts("FAT32: sd_read_block sonuc: ");
+    uart_hex(read_result);
+    uart_puts("\n");
+    if(read_result != SD_OK) {
         uart_puts("FAT32: Boot sector okunamadi\n");
         return FAT_ERROR;
     }
+    uart_puts("FAT32: Boot sector okundu\n");
 
-    bs = (FAT32BootSector*)buffer;
+    /* İlk birkaç byte'ı kontrol et */
+    uart_puts("FAT32: Buffer[0-2]: ");
+    uart_hex(boot_sector_buffer[0]);
+    uart_puts(" ");
+    uart_hex(boot_sector_buffer[1]);
+    uart_puts(" ");
+    uart_hex(boot_sector_buffer[2]);
+    uart_puts("\n");
 
-    /* FAT32 kontrolü */
-    if(bs->bytes_per_sector != 512) {
+    /* Değerleri doğrudan buffer'dan oku (packed struct sorununu önle) */
+    uart_puts("FAT32: Reading bytes_per_sector...\n");
+
+    /* Volatile pointer kullan - derleyici optimizasyonunu önle */
+    volatile uint8_t *buf = boot_sector_buffer;
+
+    uint16_t bytes_per_sector = buf[11] | ((uint16_t)buf[12] << 8);
+    uart_puts("FAT32: bps read done\n");
+
+    uint8_t sectors_per_cluster = buf[13];
+    uint16_t reserved_sectors = buf[14] | ((uint16_t)buf[15] << 8);
+    uint8_t fat_count = buf[16];
+    uint32_t fat_size_32 = buf[36] | ((uint32_t)buf[37] << 8) |
+                           ((uint32_t)buf[38] << 16) | ((uint32_t)buf[39] << 24);
+    uint32_t root_cluster = buf[44] | ((uint32_t)buf[45] << 8) |
+                            ((uint32_t)buf[46] << 16) | ((uint32_t)buf[47] << 24);
+
+    uart_puts("FAT32: bytes_per_sector: ");
+    uart_hex(bytes_per_sector);
+    uart_puts("\n");
+
+    if(bytes_per_sector != 512) {
         uart_puts("FAT32: Desteklenmeyen sektor boyutu\n");
         return FAT_ERROR;
     }
 
+    uart_puts("FAT32: sectors_per_cluster: ");
+    uart_hex(sectors_per_cluster);
+    uart_puts("\n");
+    uart_puts("FAT32: root_cluster: ");
+    uart_hex(root_cluster);
+    uart_puts("\n");
+
     /* FAT32 bilgilerini kaydet */
-    fat32.bytes_per_sector = bs->bytes_per_sector;
-    fat32.sectors_per_cluster = bs->sectors_per_cluster;
-    fat32.cluster_size = fat32.bytes_per_sector * fat32.sectors_per_cluster;
-    fat32.fat_start = bs->reserved_sectors;
-    fat32.fat_size = bs->fat_size_32;
-    fat32.data_start = fat32.fat_start + (bs->fat_count * fat32.fat_size);
-    fat32.root_cluster = bs->root_cluster;
+    fat32.bytes_per_sector = bytes_per_sector;
+    fat32.sectors_per_cluster = sectors_per_cluster;
+    fat32.cluster_size = bytes_per_sector * sectors_per_cluster;
+    fat32.fat_start = reserved_sectors;
+    fat32.fat_size = fat_size_32;
+    fat32.data_start = fat32.fat_start + (fat_count * fat32.fat_size);
+    fat32.root_cluster = root_cluster;
     fat32.mounted = 1;
 
     uart_puts("FAT32 baslatildi!\n");
@@ -180,14 +279,81 @@ int fat32_is_mounted(void) {
     return fat32.mounted;
 }
 
+/* Yardımcı: Path'i parçala ve cluster bul */
+static uint32_t find_cluster_by_path(const char *path) {
+    if(!path || path[0] == 0 || (path[0] == '/' && path[1] == 0)) {
+        return fat32.root_cluster;
+    }
+
+    uint32_t current_cluster = fat32.root_cluster;
+    const char *p = path;
+    if(*p == '/') p++;
+
+    char component[MAX_FILENAME];
+
+    while(*p) {
+        /* Sonraki path component'i al */
+        int i = 0;
+        while(*p && *p != '/' && i < MAX_FILENAME - 1) {
+            component[i++] = *p++;
+        }
+        component[i] = 0;
+        if(*p == '/') p++;
+
+        if(i == 0) continue;
+
+        /* Bu component'i mevcut dizinde ara */
+        dir_state.open = 1;
+        dir_state.cluster = current_cluster;
+        dir_state.entry_index = 0;
+
+        uint32_t sector = cluster_to_sector(dir_state.cluster);
+        if(sd_read_block(sector, dir_state.sector_buffer) != SD_OK) {
+            return 0;
+        }
+
+        int found = 0;
+        FileInfo info;
+        while(fat32_read_dir(&info) == FAT_OK) {
+            /* İsim karşılaştır */
+            int match = 1;
+            int j = 0;
+            while(component[j] && info.name[j]) {
+                if(!char_equal_ci(component[j], info.name[j])) {
+                    match = 0;
+                    break;
+                }
+                j++;
+            }
+            if(match && !component[j] && !info.name[j] && info.is_dir) {
+                current_cluster = info.cluster;
+                found = 1;
+                break;
+            }
+        }
+        dir_state.open = 0;
+
+        if(!found) return 0;
+    }
+
+    return current_cluster;
+}
+
 /* Dizin aç */
 int fat32_open_dir(const char *path) {
     if(!fat32.mounted) return FAT_ERROR;
 
-    /* Şimdilik sadece root dizini destekle */
+    /* Path'e göre cluster bul */
+    uint32_t cluster = find_cluster_by_path(path);
+    if(cluster == 0) {
+        return FAT_NOT_FOUND;
+    }
+
     dir_state.open = 1;
-    dir_state.cluster = fat32.root_cluster;
+    dir_state.cluster = cluster;
     dir_state.entry_index = 0;
+    dir_state.lfn_valid = 0;
+    dir_state.lfn_buffer[0] = 0;
 
     /* İlk sektörü oku */
     uint32_t sector = cluster_to_sector(dir_state.cluster);
@@ -203,10 +369,26 @@ int fat32_open_dir(const char *path) {
 int fat32_read_dir(FileInfo *info) {
     if(!dir_state.open) return FAT_ERROR;
 
+    static int read_count = 0;
+    read_count++;
+    if(read_count < 5) {
+        uart_puts("[FAT32] read_dir called #");
+        uart_hex(read_count);
+        uart_puts("\n");
+    }
+
     while(1) {
+        uart_puts("[FAT32] loop start\n");
+
         /* Cluster içindeki sektör ve entry hesapla */
         uint32_t entries_per_sector = 512 / sizeof(FAT32DirEntry);
         uint32_t entries_per_cluster = entries_per_sector * fat32.sectors_per_cluster;
+
+        uart_puts("[FAT32] entries_per_sector: ");
+        uart_hex(entries_per_sector);
+        uart_puts(" entry_index: ");
+        uart_hex(dir_state.entry_index);
+        uart_puts("\n");
 
         /* Cluster bitti mi? */
         if(dir_state.entry_index >= entries_per_cluster) {
@@ -238,38 +420,147 @@ int fat32_read_dir(FileInfo *info) {
         }
 
         /* Entry'yi al */
-        FAT32DirEntry *entry = (FAT32DirEntry*)(dir_state.sector_buffer + sector_index * sizeof(FAT32DirEntry));
+        uint32_t entry_offset = sector_index * sizeof(FAT32DirEntry);
+        volatile uint8_t *entry_ptr = dir_state.sector_buffer + entry_offset;
 
         dir_state.entry_index++;
 
+        /* İlk byte'ı güvenli şekilde oku */
+        uint8_t first_byte = entry_ptr[0];
+
+        uart_puts("[FAT32] first_byte: ");
+        uart_hex(first_byte);
+        uart_puts("\n");
+
         /* Dizin sonu */
-        if(entry->name[0] == 0x00) {
+        if(first_byte == 0x00) {
+            uart_puts("[FAT32] EOF reached\n");
             return FAT_EOF;
         }
 
         /* Silinen dosya */
-        if((uint8_t)entry->name[0] == 0xE5) {
+        if(first_byte == 0xE5) {
+            uart_puts("[FAT32] deleted entry, skip\n");
             continue;
         }
 
-        /* Long filename entry (şimdilik atla) */
-        if(entry->attr == ATTR_LONG_NAME) {
+        /* Attribute byte'ı oku (offset 11) */
+        uint8_t attr = entry_ptr[11];
+        uart_puts("[FAT32] attr: ");
+        uart_hex(attr);
+        uart_puts("\n");
+
+        /* Long filename entry - topla */
+        if(attr == ATTR_LONG_NAME) {
+            uart_puts("[LFN] entry detected\n");
+            uint8_t seq = entry_ptr[0];
+            uint8_t chksum = entry_ptr[13];
+            uart_puts("[LFN] seq=");
+            uart_hex(seq);
+            uart_puts(" chk=");
+            uart_hex(chksum);
+            uart_puts("\n");
+
+            /* İlk LFN entry (sıra numarası 0x40 ile OR'lanmış) */
+            if(seq & 0x40) {
+                uart_puts("[LFN] first entry\n");
+                /* Yeni LFN başlıyor */
+                dir_state.lfn_index = 0;
+                dir_state.lfn_checksum = chksum;
+                dir_state.lfn_valid = 1;
+                /* Buffer'ı temizle - sadece ilk byte yeterli */
+                dir_state.lfn_buffer[0] = 0;
+            }
+
+            /* Checksum kontrol */
+            if(chksum != dir_state.lfn_checksum) {
+                dir_state.lfn_valid = 0;
+            }
+
+            if(dir_state.lfn_valid) {
+                uart_puts("[LFN] extracting chars\n");
+                /* LFN entry'ler ters sırada gelir */
+                int seq_num = (seq & 0x1F) - 1;  /* 0-indexed sıra */
+                int buf_offset = seq_num * 13;
+                uart_puts("[LFN] seq_num=");
+                uart_hex(seq_num);
+                uart_puts(" buf_offset=");
+                uart_hex(buf_offset);
+                uart_puts("\n");
+
+                /* Her LFN entry 13 karakter içerir */
+                for(int i = 0; i < 13; i++) {
+                    uart_puts("[LFN] reading char ");
+                    uart_hex(i);
+                    uart_puts("\n");
+                    char c = lfn_read_char(entry_ptr, i);
+                    uart_puts("[LFN] got: ");
+                    uart_hex(c);
+                    uart_puts("\n");
+                    if(c == 0) break;
+                    if(buf_offset + i < 255) {
+                        dir_state.lfn_buffer[buf_offset + i] = c;
+                    }
+                }
+                uart_puts("[LFN] chars done\n");
+            }
+            uart_puts("[LFN] continue\n");
             continue;
         }
 
         /* Volume label (atla) */
-        if(entry->attr & ATTR_VOLUME_ID) {
+        if(attr & ATTR_VOLUME_ID) {
+            dir_state.lfn_valid = 0;
             continue;
         }
 
-        /* Dosya bilgisini doldur */
-        convert_83_to_name(entry->name, info->name);
-        info->size = entry->size;
-        info->cluster = (entry->cluster_high << 16) | entry->cluster_low;
-        info->attr = entry->attr;
-        info->is_dir = (entry->attr & ATTR_DIRECTORY) ? 1 : 0;
-        info->date = entry->modify_date;
-        info->time = entry->modify_time;
+        /* Normal dosya girişi */
+        /* İsim (0-10) */
+        char name83[12];
+        for(int i = 0; i < 11; i++) {
+            name83[i] = entry_ptr[i];
+        }
+        name83[11] = 0;
+
+        /* LFN var mı ve checksum eşleşiyor mu? */
+        if(dir_state.lfn_valid && dir_state.lfn_buffer[0] != 0) {
+            uint8_t calc_chksum = lfn_checksum((const uint8_t*)name83);
+            if(calc_chksum == dir_state.lfn_checksum) {
+                /* LFN kullan */
+                int i = 0;
+                while(dir_state.lfn_buffer[i] && i < MAX_FILENAME - 1) {
+                    info->name[i] = dir_state.lfn_buffer[i];
+                    i++;
+                }
+                info->name[i] = 0;
+            } else {
+                /* Checksum eşleşmedi, 8.3 kullan */
+                convert_83_to_name(name83, info->name);
+            }
+        } else {
+            /* LFN yok, 8.3 kullan */
+            convert_83_to_name(name83, info->name);
+        }
+
+        /* LFN state'i sıfırla */
+        dir_state.lfn_valid = 0;
+        dir_state.lfn_buffer[0] = 0;
+
+        /* Size (offset 28-31, little endian) */
+        info->size = entry_ptr[28] | ((uint32_t)entry_ptr[29] << 8) |
+                     ((uint32_t)entry_ptr[30] << 16) | ((uint32_t)entry_ptr[31] << 24);
+
+        /* Cluster (high: 20-21, low: 26-27) */
+        uint16_t cluster_high = entry_ptr[20] | ((uint16_t)entry_ptr[21] << 8);
+        uint16_t cluster_low = entry_ptr[26] | ((uint16_t)entry_ptr[27] << 8);
+        info->cluster = ((uint32_t)cluster_high << 16) | cluster_low;
+
+        info->attr = attr;
+        info->is_dir = (attr & ATTR_DIRECTORY) ? 1 : 0;
+
+        /* Date/time (offset 24-25: time, 22-23: date) */
+        info->time = entry_ptr[22] | ((uint16_t)entry_ptr[23] << 8);
+        info->date = entry_ptr[24] | ((uint16_t)entry_ptr[25] << 8);
 
         return FAT_OK;
     }

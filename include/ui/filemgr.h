@@ -8,7 +8,9 @@
 typedef enum {
     FM_STATE_LOADING,
     FM_STATE_READY,
-    FM_STATE_ERROR
+    FM_STATE_ERROR,
+    FM_STATE_VIEWING,    /* Text dosya görüntüleme modu */
+    FM_STATE_IMAGE       /* Resim görüntüleme modu */
 } FileMgrState;
 
 /* Fonksiyonlar */
@@ -27,5 +29,7 @@ void filemgr_update(void);
 FileMgrState filemgr_get_state(void);
 int filemgr_get_file_count(void);
 int filemgr_get_selected(void);
+int filemgr_get_path_depth(void);
+int filemgr_is_at_root(void);
 
 #endif
