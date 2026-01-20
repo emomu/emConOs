@@ -307,26 +307,50 @@ int sd_init(void) {
 int sd_read_block(uint32_t lba, uint8_t *buffer) {
     if(!sd_card.initialized) return SD_ERROR;
 
+    uart_puts("[SD] read_block lba=");
+    uart_hex(lba);
+    uart_puts(" buf=");
+    uart_hex((uint32_t)(uintptr_t)buffer);
+    uart_puts("\n");
+
+    /* Buffer alignment kontrolü */
+    if((uintptr_t)buffer & 3) {
+        uart_puts("[SD] WARNING: buffer not 4-byte aligned!\n");
+    }
+
     /* SDHC için LBA, SDv1/v2 için byte adresi */
     uint32_t addr = (sd_card.type == SD_TYPE_SDHC) ? lba : (lba * 512);
 
+    uart_puts("[SD] addr=");
+    uart_hex(addr);
+    uart_puts("\n");
+
     /* Veri hazır olana kadar bekle */
     if(sd_wait_for_data() != SD_OK) {
+        uart_puts("[SD] wait_for_data TIMEOUT\n");
         return SD_TIMEOUT;
     }
 
     /* Blok sayısını ayarla */
     *EMMC_BLKSIZECNT = (1 << 16) | 512;
 
+    uart_puts("[SD] sending CMD17...\n");
+
     /* READ_SINGLE_BLOCK (CMD17) */
     if(sd_send_command(CMD_READ_SINGLE, addr) != SD_OK) {
+        uart_puts("[SD] CMD17 FAILED\n");
         return SD_ERROR;
     }
 
+    uart_puts("[SD] waiting for READ_RDY...\n");
+
     /* Veri okumayı bekle */
     if(sd_wait_for_interrupt(INT_READ_RDY) != SD_OK) {
+        uart_puts("[SD] READ_RDY TIMEOUT\n");
         return SD_ERROR;
     }
+
+    uart_puts("[SD] reading data...\n");
 
     /* Veriyi oku */
     uint32_t *buf32 = (uint32_t*)buffer;
@@ -334,13 +358,17 @@ int sd_read_block(uint32_t lba, uint8_t *buffer) {
         buf32[i] = *EMMC_DATA;
     }
 
+    uart_puts("[SD] waiting for DATA_DONE...\n");
+
     /* Data done bekle */
     if(sd_wait_for_interrupt(INT_DATA_DONE) != SD_OK) {
+        uart_puts("[SD] DATA_DONE TIMEOUT\n");
         return SD_ERROR;
     }
 
     *EMMC_INTERRUPT = INT_DATA_DONE | INT_READ_RDY;
 
+    uart_puts("[SD] read_block OK\n");
     return SD_OK;
 }
 

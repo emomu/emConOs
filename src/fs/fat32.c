@@ -775,6 +775,9 @@ int fat32_read(int fd, void *buffer, uint32_t size) {
         }
     }
 
+    uart_puts("[READ] returning bytes_read=");
+    uart_hex(bytes_read);
+    uart_puts("\n");
     return bytes_read;
 }
 

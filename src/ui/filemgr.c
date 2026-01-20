@@ -2,6 +2,7 @@
 #include <ui/filemgr.h>
 #include <ui/theme.h>
 #include <fs/fat32.h>
+#include <fs/png.h>
 #include <graphics.h>
 #include <fonts/fonts.h>
 #include <types.h>
@@ -63,6 +64,9 @@ static int img_loaded = 0;
 
 /* BMP row buffer - stack overflow önleme */
 static uint8_t bmp_row_buf[MAX_IMG_WIDTH * 4 + 4];
+
+/* BMP header buffer - stack overflow önleme */
+static uint8_t bmp_header[64];
 
 /* --- YARDIMCI FONKSİYONLAR --- */
 
@@ -250,34 +254,51 @@ static int open_bmp_file(const char *filename) {
     uart_hex(fd);
     uart_puts("\n");
 
-    /* BMP header'ı oku (54 byte) */
+    /* BMP header'ı oku (54 byte) - static bmp_header kullan */
     uart_puts("[BMP] Reading header...\n");
-    uint8_t header[54];
-    if(fat32_read(fd, header, 54) != 54) {
+    int hdr_read = fat32_read(fd, bmp_header, 54);
+    uart_puts("[BMP] header read returned: ");
+    uart_hex(hdr_read);
+    uart_puts("\n");
+    if(hdr_read != 54) {
         uart_puts("[BMP] Failed to read header\n");
         fat32_close(fd);
         return -1;
     }
 
+    uart_puts("[BMP] sig: ");
+    uart_hex(bmp_header[0]);
+    uart_puts(" ");
+    uart_hex(bmp_header[1]);
+    uart_puts("\n");
+
     /* BMP imzasını kontrol et */
-    if(header[0] != 'B' || header[1] != 'M') {
+    if(bmp_header[0] != 'B' || bmp_header[1] != 'M') {
         uart_puts("[BMP] Invalid signature\n");
         fat32_close(fd);
         return -1;
     }
 
-    /* Boyutları oku (little endian) */
-    int width = header[18] | (header[19] << 8) | (header[20] << 16) | (header[21] << 24);
-    int height = header[22] | (header[23] << 8) | (header[24] << 16) | (header[25] << 24);
-    int bpp = header[28] | (header[29] << 8);
-    int data_offset = header[10] | (header[11] << 8) | (header[12] << 16) | (header[13] << 24);
+    uart_puts("[BMP] sig OK\n");
 
-    uart_puts("[BMP] Width: ");
+    /* Header'dan değerleri oku - volatile ile optimize edilmesini engelle */
+    volatile uint8_t *hdr = bmp_header;
+
+    int width = hdr[18] | (hdr[19] << 8) | (hdr[20] << 16) | (hdr[21] << 24);
+    int height = hdr[22] | (hdr[23] << 8) | (hdr[24] << 16) | (hdr[25] << 24);
+    int bpp = hdr[28] | (hdr[29] << 8);
+    int data_offset = hdr[10] | (hdr[11] << 8) | (hdr[12] << 16) | (hdr[13] << 24);
+
+    uart_puts("[BMP] parsed from header\n");
+
+    uart_puts("[BMP] W=");
     uart_hex(width);
-    uart_puts(" Height: ");
+    uart_puts(" H=");
     uart_hex(height);
-    uart_puts(" BPP: ");
+    uart_puts(" BPP=");
     uart_hex(bpp);
+    uart_puts(" off=");
+    uart_hex(data_offset);
     uart_puts("\n");
 
     /* Negatif height = top-down */
@@ -301,18 +322,29 @@ static int open_bmp_file(const char *filename) {
         return -1;
     }
 
+    uart_puts("[BMP] bpp OK, seeking...\n");
+
     /* Data offset'e git */
     fat32_seek(fd, data_offset);
 
     /* Row padding (4 byte boundary) */
     int row_size = ((width * (bpp / 8) + 3) / 4) * 4;
 
+    uart_puts("[BMP] row_size=");
+    uart_hex(row_size);
+    uart_puts(" reading rows...\n");
+
     /* Her satırı oku - statik bmp_row_buf kullan */
     for(int y = 0; y < height; y++) {
         int dest_y = top_down ? y : (height - 1 - y);
 
-        if(fat32_read(fd, bmp_row_buf, row_size) != row_size) {
-            uart_puts("[BMP] Failed to read row\n");
+        int row_read = fat32_read(fd, bmp_row_buf, row_size);
+        if(row_read != row_size) {
+            uart_puts("[BMP] row ");
+            uart_hex(y);
+            uart_puts(" read failed, got ");
+            uart_hex(row_read);
+            uart_puts("\n");
             fat32_close(fd);
             return -1;
         }
@@ -442,6 +474,10 @@ static int open_gif_file(const char *filename) {
 }
 
 /* PNG dosyasını yükle (basit - sadece header ve boyut bilgisi) */
+/* PNG dosya okuma buffer'ı - static */
+#define PNG_FILE_MAX (300 * 1024)  /* 300KB max PNG dosya boyutu */
+static uint8_t png_file_buf[PNG_FILE_MAX];
+
 static int open_png_file(const char *filename) {
     char full_path[MAX_FM_PATH];
     str_copy(full_path, fm_path, MAX_FM_PATH);
@@ -463,55 +499,41 @@ static int open_png_file(const char *filename) {
         }
     }
 
-    /* PNG signature (8 bytes) + IHDR chunk */
-    uint8_t header[33];
-    if(fat32_read(fd, header, 33) != 33) {
-        uart_puts("[PNG] Failed to read header\n");
-        fat32_close(fd);
-        return -1;
-    }
-
-    /* PNG signature kontrolü */
-    if(header[0] != 0x89 || header[1] != 'P' || header[2] != 'N' || header[3] != 'G') {
-        uart_puts("[PNG] Invalid signature\n");
-        fat32_close(fd);
-        return -1;
-    }
-
-    /* IHDR chunk (offset 8) - boyutları oku (big endian) */
-    int width = (header[16] << 24) | (header[17] << 16) | (header[18] << 8) | header[19];
-    int height = (header[20] << 24) | (header[21] << 16) | (header[22] << 8) | header[23];
-    int bit_depth = header[24];
-    int color_type = header[25];
-
-    uart_puts("[PNG] Width: ");
-    uart_hex(width);
-    uart_puts(" Height: ");
-    uart_hex(height);
-    uart_puts(" Depth: ");
-    uart_hex(bit_depth);
-    uart_puts(" ColorType: ");
-    uart_hex(color_type);
+    /* Dosya boyutunu al */
+    uint32_t file_size = fat32_size(fd);
+    uart_puts("[PNG] File size: ");
+    uart_hex(file_size);
     uart_puts("\n");
 
-    fat32_close(fd);
-
-    if(width > MAX_IMG_WIDTH || height > MAX_IMG_HEIGHT) {
-        uart_puts("[PNG] Image too large\n");
+    if(file_size > PNG_FILE_MAX) {
+        uart_puts("[PNG] File too large\n");
+        fat32_close(fd);
         return -1;
     }
 
-    /* PNG deflate decode çok karmaşık - placeholder göster */
-    /* Gri gradient placeholder */
-    for(int y = 0; y < height; y++) {
-        for(int x = 0; x < width; x++) {
-            int idx = (y * MAX_IMG_WIDTH + x) * 4;
-            uint8_t gray = ((x + y) * 255) / (width + height);
-            img_buffer[idx + 0] = gray;
-            img_buffer[idx + 1] = gray;
-            img_buffer[idx + 2] = gray;
-            img_buffer[idx + 3] = 255;
-        }
+    /* Tüm dosyayı oku */
+    uint32_t total_read = 0;
+    while(total_read < file_size) {
+        int chunk = fat32_read(fd, png_file_buf + total_read, file_size - total_read);
+        if(chunk <= 0) break;
+        total_read += chunk;
+    }
+    fat32_close(fd);
+
+    uart_puts("[PNG] Read ");
+    uart_hex(total_read);
+    uart_puts(" bytes\n");
+
+    if(total_read < 8) {
+        uart_puts("[PNG] File too small\n");
+        return -1;
+    }
+
+    /* PNG decoder'ı çağır */
+    int width, height;
+    if(png_decode(png_file_buf, total_read, img_buffer, MAX_IMG_WIDTH, MAX_IMG_HEIGHT, &width, &height) < 0) {
+        uart_puts("[PNG] Decode failed\n");
+        return -1;
     }
 
     img_width = width;
@@ -519,7 +541,7 @@ static int open_png_file(const char *filename) {
     img_loaded = 1;
     str_copy(view_filename, filename, MAX_FM_NAME);
 
-    uart_puts("[PNG] Header loaded (no deflate decode)\n");
+    uart_puts("[PNG] Loaded successfully\n");
     return 0;
 }
 
